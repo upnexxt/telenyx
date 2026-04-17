@@ -34,7 +34,7 @@ const configSchema = z.object({
   RESEND_API_KEY: z.string().min(1).default(''),
 
   // Logging
-  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('debug'),
 });
 
 export type Config = z.infer<typeof configSchema>;
