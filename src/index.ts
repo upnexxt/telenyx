@@ -121,42 +121,11 @@ wss.on('connection', (ws, req) => {
       const message = JSON.parse(data.toString());
 
       if (message.event === 'media') {
-        // Process incoming audio from Telnyx → Gemini via DSP pipeline
         const audioPayload = message.media.payload;
-
-        // ✅ Logger removed to prevent spam and event loop lag
-
-        // Apply DSP transformations and forward to Gemini
-        try {
-          const aiService = AIService.getInstance();
-          const pipeline = AudioPipeline.getInstance();
-          const dspState = session.dspState;
-
-          if (!dspState) {
-            throw new Error('DSP state not initialized for session');
-          }
-
-          // Process inbound audio through DSP pipeline:
-          // - Swap16 (BE → LE endianness)
-          // - DC offset removal (high-pass at 80Hz)
-          // - Echo suppression (if AI is speaking)
-          const isAiSpeaking = session.status === CallStatus.AI_SPEAKING;
-          const processed = pipeline.processInbound(audioPayload, dspState.dcIn, isAiSpeaking);
-
-          // Send to Gemini
-          aiService.sendAudio(sessionId, processed);
-
-          // Send to Gemini
-          aiService.sendAudio(sessionId, processed);
-
-        } catch (error) {
-          const err = error as Error;
-          logger.error({
-            sessionId,
-            tenantId,
-            error: err.message
-          }, 'Error processing inbound audio');
-        }
+        const aiService = AIService.getInstance();
+        
+        // Pass to AIService which handles transcoding (8kHz PCMA -> 16kHz PCM)
+        aiService.sendAudio(sessionId, audioPayload);
 
       } else if (message.event === 'start' || message.event === 'connected') {
         const streamId = message.stream_id || (message.start ? message.start.stream_id : null);
@@ -165,42 +134,45 @@ wss.on('connection', (ws, req) => {
           logger.info(`Telnyx stream started with ID: ${streamId}`);
         }
 
-        logCallEvent('info', 'Media stream connected', {
-          sessionId,
-          tenantId
-        });
+        // Only run setup once!
+        if (session.status !== CallStatus.CONNECTED) {
+          logCallEvent('info', 'Media stream connected', {
+            sessionId,
+            tenantId
+          });
 
-        // Update session status
-        callManager.updateSessionStatus(sessionId, CallStatus.CONNECTED);
+          // Update session status
+          callManager.updateSessionStatus(sessionId, CallStatus.CONNECTED);
 
-        // Initialize DSP jitter buffer with drain callback
-        const pipeline = AudioPipeline.getInstance();
-        pipeline.createJitterBuffer(sessionId, (chunk: Buffer) => {
-          // Drain callback: send 20ms chunk to Telnyx
-          callManager.sendAudioToTelnyx(sessionId, chunk.toString('base64'));
-        });
+          // Initialize DSP jitter buffer with drain callback
+          const pipeline = AudioPipeline.getInstance();
+          pipeline.createJitterBuffer(sessionId, (chunk: Buffer) => {
+            // Drain callback: send 20ms chunk to Telnyx
+            callManager.sendAudioToTelnyx(sessionId, chunk.toString('base64'));
+          });
 
-        // Initialize call log
-        const supabase = SupabaseService.getInstance();
-        await supabase.createCallLog(
-          sessionId,
-          tenantId,
-          session.metadata['fromNumber'] as string,
-          session.metadata['toNumber'] as string,
-          session.callControlId
-        );
+          // Initialize call log
+          const supabase = SupabaseService.getInstance();
+          await supabase.createCallLog(
+            sessionId,
+            tenantId,
+            session.metadata['fromNumber'] as string,
+            session.metadata['toNumber'] as string,
+            session.callControlId
+          );
 
-        // Start Gemini AI session
-        const aiService = AIService.getInstance();
-        await aiService.startSession(sessionId, tenantId);
+          // Start Gemini AI session
+          const aiService = AIService.getInstance();
+          await aiService.startSession(sessionId, tenantId);
 
-        // Log system event
-        await supabase.logSystemEvent(
-          tenantId,
-          'media_stream_connected',
-          { sessionId, callControlId: session.callControlId },
-          sessionId
-        );
+          // Log system event
+          await supabase.logSystemEvent(
+            tenantId,
+            'media_stream_connected',
+            { sessionId, callControlId: session.callControlId },
+            sessionId
+          );
+        }
 
       } else if (message.event === 'stopped') {
         logCallEvent('info', 'Media stream stopped', {

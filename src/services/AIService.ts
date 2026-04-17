@@ -34,19 +34,44 @@ export class AIService {
   }
 
   /**
-   * Downsamples 24kHz PCM audio from Gemini to 16kHz for Telnyx L16
+   * Transcodes 8kHz A-Law (Telnyx/PCMA) to 16kHz PCM (Gemini)
    */
-  private downsampleGemini(base64Pcm24k: string): string {
+  private transcodeTelnyxToGemini(base64Payload: string): string {
     try {
-      const buffer = Buffer.from(base64Pcm24k, 'base64');
       const wav = new WaveFile();
-      wav.fromScratch(1, 24000, '16', buffer);
+      // Setup as 8kHz Mono A-Law
+      wav.fromScratch(1, 8000, '8a', Buffer.from(base64Payload, 'base64'));
+      // Decode A-Law to Linear PCM
+      wav.fromALaw();
+      // Resample to 16kHz for Gemini
       wav.toSampleRate(16000);
+      
       const samples = (wav as any).data.samples;
       return Buffer.from(samples).toString('base64');
     } catch (error) {
-      logger.error({ error: (error as Error).message }, 'Error downsampling audio');
-      return base64Pcm24k;
+      logger.error({ error: (error as Error).message }, 'Error transcoding Telnyx -> Gemini');
+      return base64Payload;
+    }
+  }
+
+  /**
+   * Transcodes 24kHz PCM (Gemini) to 8kHz A-Law (Telnyx/PCMA)
+   */
+  private transcodeGeminiToTelnyx(base64Payload: string): string {
+    try {
+      const wav = new WaveFile();
+      // Setup as 24kHz Mono 16-bit PCM
+      wav.fromScratch(1, 24000, '16', Buffer.from(base64Payload, 'base64'));
+      // Downsample to 8kHz for phone line
+      wav.toSampleRate(8000);
+      // Encode to A-Law
+      wav.toALaw();
+      
+      const samples = (wav as any).data.samples;
+      return Buffer.from(samples).toString('base64');
+    } catch (error) {
+      logger.error({ error: (error as Error).message }, 'Error transcoding Gemini -> Telnyx');
+      return base64Payload;
     }
   }
 
@@ -54,6 +79,12 @@ export class AIService {
    * Start a Gemini Live session using the new @google/genai SDK
    */
   public async startSession(sessionId: string, tenantId: string): Promise<void> {
+    // Deduplication check: Don't start if session already exists
+    if (this.sessions.has(sessionId)) {
+      logger.debug({ sessionId }, 'Gemini session already exists, skipping initialization');
+      return;
+    }
+
     try {
       const tenantSettings = await this.supabase.getTenantSettings(tenantId);
       const systemInstruction = this.buildSystemInstruction(tenantSettings);
@@ -66,7 +97,6 @@ export class AIService {
       const liveSession = await this.genAI.live.connect({
         model: 'models/gemini-live-2.5-flash-native-audio',
         config: {
-          // ✅ FIX 1: Fields are now moved directly to config in latest SDK
           responseModalities: ['audio'] as any,
           speechConfig: {
             voiceConfig: {
@@ -85,11 +115,14 @@ export class AIService {
           onMessage: async (data: any) => {
             if (session) session.lastActivity = Date.now();
 
-            // Handle Audio Content
+            // Handle Audio Content (Gemini -> Phone)
             if (data.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data) {
               const geminiAudio24k = data.serverContent.modelTurn.parts[0].inlineData.data;
-              const telnyxAudio16k = this.downsampleGemini(geminiAudio24k);
-              this.callManager.sendAudioToTelnyx(sessionId, telnyxAudio16k);
+              
+              // Transcode 24kHz PCM -> 8kHz PCMA
+              const telnyxAudioAuto = this.transcodeGeminiToTelnyx(geminiAudio24k);
+              
+              this.callManager.sendAudioToTelnyx(sessionId, telnyxAudioAuto);
               this.callManager.updateSessionStatus(sessionId, CallStatus.AI_SPEAKING);
             }
 
@@ -137,21 +170,22 @@ export class AIService {
   /**
    * Send audio FROM Telnyx -> TO Gemini
    */
-  public sendAudio(sessionId: string, audioData: Buffer): void {
+  public sendAudio(sessionId: string, base64Audio: string): void {
     const session = this.sessions.get(sessionId);
     if (!session || !session.isSetup) return;
 
     try {
-      // ✅ FIX 2: Use sendRealtimeInput method with the 'audio' object
+      // Transcode 8kHz PCMA -> 16kHz PCM
+      const geminiAudio = this.transcodeTelnyxToGemini(base64Audio);
+
       session.liveSession.sendRealtimeInput({
         audio: {
           mimeType: 'audio/pcm;rate=16000',
-          data: audioData.toString('base64')
+          data: geminiAudio
         }
       });
       session.lastActivity = Date.now();
     } catch (error) {
-      // Log only on first failure to prevent log spam in case of persistent error
       if (Date.now() - session.lastActivity > 1000) {
         logger.error({ sessionId, error: (error as Error).message }, 'Error sending audio to Gemini');
       }
@@ -172,7 +206,6 @@ export class AIService {
           result = await this.handleBookAppointment(session.tenantId, call.args);
         }
 
-        // Send tool response via the SDK
         session.liveSession.send({
           toolResponse: {
             functionResponses: [{

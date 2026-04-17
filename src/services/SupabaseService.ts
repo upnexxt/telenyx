@@ -374,7 +374,7 @@ export class SupabaseService {
     try {
       const { error } = await this.client.from('system_logs').insert({
         event: eventType,
-        content: content || {},
+        metadata: content || {},
         message: eventType,
         session_id: correlationId || null,
         level: 'info',
