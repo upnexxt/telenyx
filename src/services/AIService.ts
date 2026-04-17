@@ -4,6 +4,7 @@ import { config } from '../core/config';
 import { logger } from '../core/logger';
 import { SupabaseService } from './SupabaseService';
 import { CallManager } from '../core/CallManager';
+import { AudioPipeline } from '../audio/AudioPipeline';
 import { CallStatus } from '../types';
 import type { TenantSettings } from '../types/schema';
 
@@ -13,6 +14,7 @@ interface GeminiSession {
   tenantId: string;
   isSetup: boolean;
   lastActivity: number;
+  isAiSpeaking: boolean;
 }
 
 export class AIService {
@@ -118,16 +120,33 @@ export class AIService {
             // Handle Audio Content (Gemini -> Phone)
             if (data.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data) {
               const geminiAudio24k = data.serverContent.modelTurn.parts[0].inlineData.data;
-              
+
               // Transcode 24kHz PCM -> 8kHz PCMA
               const telnyxAudioAuto = this.transcodeGeminiToTelnyx(geminiAudio24k);
-              
-              this.callManager.sendAudioToTelnyx(sessionId, telnyxAudioAuto);
+
+              // Route through jitter buffer for paced delivery
+              const pipeline = AudioPipeline.getInstance();
+              const jitterBuffer = (pipeline as any).jitterBuffers?.get(sessionId);
+              if (jitterBuffer) {
+                // Decode base64 and push to jitter buffer
+                const audioBuffer = Buffer.from(telnyxAudioAuto, 'base64');
+                jitterBuffer.push(audioBuffer);
+              } else {
+                // Fallback: send directly if jitter buffer not available
+                this.callManager.sendAudioToTelnyx(sessionId, telnyxAudioAuto);
+              }
+
+              if (session) {
+                session.isAiSpeaking = true;
+              }
               this.callManager.updateSessionStatus(sessionId, CallStatus.AI_SPEAKING);
             }
 
             // Handle Interruption
             if (data.serverContent?.interrupted) {
+              if (session) {
+                session.isAiSpeaking = false;
+              }
               this.callManager.updateSessionStatus(sessionId, CallStatus.USER_SPEAKING);
             }
 
@@ -151,6 +170,7 @@ export class AIService {
         sessionId,
         tenantId,
         isSetup: true,
+        isAiSpeaking: false,
         lastActivity: Date.now()
       };
 
