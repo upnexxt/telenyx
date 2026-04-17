@@ -1,6 +1,15 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Database } from '../types';
 import { config } from '../core/config';
+import { logger } from '../core/logger';
+import type { TenantSettings, CallTrace, Tables } from '../types/schema';
+
+interface BookingParams {
+  customerPhone: string;
+  startTime: string;
+  serviceId: string;
+  employeeId: string;
+}
 
 export class SupabaseService {
   private static instance: SupabaseService;
@@ -30,21 +39,130 @@ export class SupabaseService {
     return this.client;
   }
 
-  public async checkAvailability(tenantId: string, date: string, serviceId: string, employeeId?: string): Promise<string[]> {
-    // Mock implementation - return some available slots
-    return ["09:00", "10:00", "11:00", "13:00", "14:30", "15:30"];
+  /**
+   * Get tenant settings (including AI configuration)
+   */
+  public async getTenantSettings(tenantId: string): Promise<TenantSettings> {
+    try {
+      const { data, error } = await this.client
+        .from('tenant_settings')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .single();
+
+      if (error) {
+        logger.error({ tenantId, error: error.message }, 'Error fetching tenant settings');
+        throw error;
+      }
+
+      if (!data) {
+        logger.warn({ tenantId }, 'No tenant settings found, using defaults');
+        return {
+          tenant_id: tenantId,
+          ai_name: 'Sophie',
+          ai_voice: 'Aoede',
+          ai_language: 'Nederlands',
+          ai_tone: 'vriendelijk en professioneel',
+          ai_temperature: 0.7,
+          business_name: 'de salon',
+          custom_instructions: ''
+        } as TenantSettings;
+      }
+
+      return data;
+    } catch (error) {
+      logger.error({ tenantId, error: (error as Error).message }, 'Error in getTenantSettings');
+      throw error;
+    }
   }
 
-  public async bookAppointment(tenantId: string, customerPhone: string, startTime: string, serviceId: string, employeeId: string): Promise<any> {
-    // Mock implementation - return success
-    return {
-      success: true,
-      appointment_id: `apt_${Date.now()}`,
-      message: `Afspraak geboekt voor ${startTime}`
-    };
+  /**
+   * Check availability using RPC call
+   * Calls the get_available_slots function in Supabase
+   */
+  public async checkAvailability(
+    tenantId: string,
+    serviceId: string,
+    date: string,
+    employeeId?: string
+  ): Promise<any[]> {
+    try {
+      const { data, error } = await this.client.rpc('get_available_slots', {
+        p_tenant_id: tenantId,
+        p_service_id: serviceId,
+        p_date: date,
+        p_employee_id: employeeId ?? null
+      });
+
+      if (error) {
+        logger.error(
+          { tenantId, serviceId, date, error: error.message },
+          'Error checking availability via RPC'
+        );
+        throw error;
+      }
+
+      logger.info(
+        { tenantId, serviceId, date, slots: data?.length ?? 0 },
+        'Availability check successful'
+      );
+
+      return data || [];
+    } catch (error) {
+      logger.error(
+        { tenantId, serviceId, date, error: (error as Error).message },
+        'Error in checkAvailability'
+      );
+      throw error;
+    }
   }
 
-  public async findTenantByPhoneNumber(phoneNumber: string): Promise<{ tenantId: string; tenantSettings: any } | null> {
+  /**
+   * Book appointment using RPC call
+   * Calls the book_appointment_atomic function in Supabase
+   */
+  public async bookAppointment(
+    tenantId: string,
+    params: BookingParams
+  ): Promise<any> {
+    try {
+      const { data, error } = await this.client.rpc('book_appointment_atomic', {
+        p_tenant_id: tenantId,
+        p_customer_phone: params.customerPhone,
+        p_start_time: params.startTime,
+        p_service_id: params.serviceId,
+        p_employee_id: params.employeeId
+      });
+
+      if (error) {
+        logger.error(
+          { tenantId, phone: params.customerPhone, error: error.message },
+          'Error booking appointment via RPC'
+        );
+        throw error;
+      }
+
+      logger.info(
+        { tenantId, appointmentId: data?.id, startTime: params.startTime },
+        'Appointment booked successfully'
+      );
+
+      return data;
+    } catch (error) {
+      logger.error(
+        { tenantId, error: (error as Error).message },
+        'Error in bookAppointment'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Find tenant by phone number (for inbound call routing)
+   */
+  public async findTenantByPhoneNumber(
+    phoneNumber: string
+  ): Promise<{ tenantId: string; tenantSettings: any } | null> {
     try {
       // First find the tenant from telnyx_numbers
       const { data: telnyxNumber, error: telnyxError } = await this.client
@@ -54,6 +172,7 @@ export class SupabaseService {
         .single();
 
       if (telnyxError || !telnyxNumber || !telnyxNumber.tenant_id) {
+        logger.warn({ phoneNumber }, 'Phone number not found in telnyx_numbers');
         return null;
       }
 
@@ -65,6 +184,10 @@ export class SupabaseService {
         .single();
 
       if (settingsError || !settings) {
+        logger.warn(
+          { tenantId: telnyxNumber.tenant_id },
+          'Tenant settings not found'
+        );
         return null;
       }
 
@@ -73,32 +196,47 @@ export class SupabaseService {
         tenantSettings: settings
       };
     } catch (error) {
-      console.error('Error finding tenant by phone number:', error);
+      logger.error(
+        { phoneNumber, error: (error as Error).message },
+        'Error finding tenant by phone number'
+      );
       return null;
     }
   }
 
+  /**
+   * Create call log entry
+   */
   public async createCallLog(
     sessionId: string,
     tenantId: string,
-    _fromNumber: string,
-    _toNumber: string,
-    _callControlId: string
+    fromNumber: string,
+    toNumber: string,
+    callControlId: string
   ): Promise<void> {
     try {
       await this.client.from('call_logs').insert({
         id: sessionId,
         tenant_id: tenantId,
-        customer_id: _fromNumber, // Assuming customer phone as ID for now
+        customer_id: fromNumber, // Customer phone as temporary ID
         start_time: new Date().toISOString(),
-        status: 'IN_PROGRESS'
+        status: 'IN_PROGRESS',
+        metadata: { callControlId, toNumber }
       });
+
+      logger.info({ sessionId, tenantId }, 'Call log created');
     } catch (error) {
-      console.error('Error creating call log:', error);
+      logger.error(
+        { sessionId, error: (error as Error).message },
+        'Error creating call log'
+      );
       throw error;
     }
   }
 
+  /**
+   * Finalize call log with duration
+   */
   public async finalizeCallLog(
     sessionId: string,
     durationSeconds: number
@@ -106,7 +244,7 @@ export class SupabaseService {
     try {
       const endTime = new Date().toISOString();
 
-      await this.client
+      const { error } = await this.client
         .from('call_logs')
         .update({
           end_time: endTime,
@@ -114,55 +252,150 @@ export class SupabaseService {
           status: 'COMPLETED'
         })
         .eq('id', sessionId);
+
+      if (error) {
+        logger.error(
+          { sessionId, error: error.message },
+          'Error updating call log'
+        );
+        throw error;
+      }
+
+      logger.info(
+        { sessionId, durationSeconds },
+        'Call log finalized'
+      );
     } catch (error) {
-      console.error('Error finalizing call log:', error);
+      logger.error(
+        { sessionId, error: (error as Error).message },
+        'Error in finalizeCallLog'
+      );
       throw error;
     }
   }
 
+  /**
+   * Insert call trace for monitoring and debugging
+   */
+  public async insertCallTrace(trace: {
+    call_log_id: string;
+    tenant_id: string;
+    trace_type: string;
+    content?: any;
+    latency_ms?: number;
+    created_at?: string;
+  }): Promise<void> {
+    try {
+      const { error } = await this.client.from('call_traces').insert({
+        call_log_id: trace.call_log_id,
+        tenant_id: trace.tenant_id,
+        trace_type: trace.trace_type,
+        content: trace.content || {},
+        latency_ms: trace.latency_ms,
+        created_at: trace.created_at || new Date().toISOString()
+      });
+
+      if (error) {
+        logger.error(
+          { callLogId: trace.call_log_id, error: error.message },
+          'Error inserting call trace'
+        );
+        return; // Don't throw - tracing failures shouldn't break the call
+      }
+
+      logger.debug(
+        { callLogId: trace.call_log_id, traceType: trace.trace_type },
+        'Call trace inserted'
+      );
+    } catch (error) {
+      logger.error(
+        { error: (error as Error).message },
+        'Error in insertCallTrace'
+      );
+      // Silently fail - tracing is non-critical
+    }
+  }
+
+  /**
+   * Update tenant billing statistics
+   */
   public async updateTenantBilling(
     tenantId: string,
     minutesUsed: number
   ): Promise<void> {
     try {
-      // TODO: Implement billing update - table schema needs to be verified
-      console.log(`Billing update: tenant ${tenantId}, minutes ${minutesUsed}`);
-      // await this.client
-      //   .from('tenant_billing_stats')
-      //   .upsert({
-      //     tenant_id: tenantId,
-      //     total_minutes_used: minutesUsed,
-      //     last_updated: new Date().toISOString()
-      //   }, {
-      //     onConflict: 'tenant_id'
-      //   });
+      const now = new Date().toISOString();
+
+      const { error } = await this.client
+        .from('tenant_billing_stats')
+        .upsert(
+          {
+            tenant_id: tenantId,
+            minutes_used: minutesUsed,
+            updated_at: now
+          },
+          { onConflict: 'tenant_id' }
+        );
+
+      if (error) {
+        logger.error(
+          { tenantId, error: error.message },
+          'Error updating billing stats'
+        );
+        throw error;
+      }
+
+      logger.info(
+        { tenantId, minutesUsed },
+        'Tenant billing stats updated'
+      );
     } catch (error) {
-      console.error('Error updating tenant billing:', error);
+      logger.error(
+        { tenantId, error: (error as Error).message },
+        'Error in updateTenantBilling'
+      );
       throw error;
     }
   }
 
+  /**
+   * Log system event
+   */
   public async logSystemEvent(
     tenantId: string,
     eventType: string,
     content: any,
-    _correlationId?: string
+    correlationId?: string
   ): Promise<void> {
     try {
-      // TODO: Fix schema mismatch for system_logs table
-      console.log(`System log: ${eventType} for tenant ${tenantId}`, content);
-      // await this.client.from('system_logs').insert({
-      //   tenant_id: tenantId,
-      //   event: eventType,
-      //   message: JSON.stringify(content),
-      //   session_id: correlationId || null,
-      //   level: 'info',
-      //   source: 'websocket',
-      //   created_at: new Date().toISOString()
-      // });
+      const { error } = await this.client.from('system_logs').insert({
+        tenant_id: tenantId,
+        event_type: eventType,
+        content: content || {},
+        session_id: correlationId || null,
+        level: 'info',
+        source: 'websocket',
+        created_at: new Date().toISOString()
+      });
+
+      if (error) {
+        logger.warn(
+          { tenantId, error: error.message },
+          'Error logging system event'
+        );
+        return; // Don't throw - logging failures shouldn't break the call
+      }
+
+      logger.debug(
+        { tenantId, eventType, sessionId: correlationId },
+        'System event logged'
+      );
     } catch (error) {
-      console.error('Error logging system event:', error);
-      throw error;
+      logger.error(
+        { error: (error as Error).message },
+        'Error in logSystemEvent'
+      );
+      // Silently fail - logging is non-critical
     }
   }
 }

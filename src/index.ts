@@ -4,6 +4,7 @@ import http from 'http';
 import { config } from './core/config';
 import { logger, logCallEvent } from './core/logger';
 import { CallManager } from './core/CallManager';
+import { CallStatus } from './types';
 import { correlationIdMiddleware } from './api/middleware';
 import { telnyxWebhookRouter } from './api/routes/telnyxWebhook';
 import { AIService } from './services/AIService';
@@ -118,12 +119,6 @@ wss.on('connection', (ws, req) => {
             chunkSize: audioBuffer.length
           });
 
-          logCallEvent('info', 'Sent AI response to Telnyx', {
-            sessionId,
-            tenantId,
-            responseLength: responseAudioPayload.length
-          });
-
         } catch (error) {
           const err = error as Error;
           logger.error({
@@ -139,6 +134,9 @@ wss.on('connection', (ws, req) => {
           tenantId
         });
 
+        // Update session status
+        callManager.updateSessionStatus(sessionId, CallStatus.CONNECTED);
+
         // Initialize call log
         const supabase = SupabaseService.getInstance();
         await supabase.createCallLog(
@@ -153,19 +151,22 @@ wss.on('connection', (ws, req) => {
         const aiService = AIService.getInstance();
         await aiService.startSession(sessionId, tenantId);
 
-        // TODO: Log system event
-        // await supabase.logSystemEvent(
-        //   tenantId,
-        //   'media_stream_connected',
-        //   { sessionId, callControlId: session.callControlId },
-        //   sessionId
-        // );
+        // Log system event
+        await supabase.logSystemEvent(
+          tenantId,
+          'media_stream_connected',
+          { sessionId, callControlId: session.callControlId },
+          sessionId
+        );
 
       } else if (message.event === 'stopped') {
         logCallEvent('info', 'Media stream stopped', {
           sessionId,
           tenantId
         });
+
+        // Update session status
+        callManager.updateSessionStatus(sessionId, CallStatus.TERMINATING);
 
         // Finalize call log and billing
         const supabase = SupabaseService.getInstance();
@@ -176,18 +177,19 @@ wss.on('connection', (ws, req) => {
         await supabase.finalizeCallLog(sessionId, durationSeconds);
         await supabase.updateTenantBilling(tenantId, minutesUsed);
 
+        // Log system event
+        await supabase.logSystemEvent(
+          tenantId,
+          'media_stream_stopped',
+          { sessionId, durationSeconds, minutesUsed },
+          sessionId
+        );
+
         // End Gemini session
         const aiService = AIService.getInstance();
         aiService.endSession(sessionId);
 
-        // TODO: Log system event
-        // await supabase.logSystemEvent(
-        //   tenantId,
-        //   'media_stream_stopped',
-        //   { sessionId, durationSeconds, minutesUsed },
-        //   sessionId
-        // );
-
+        callManager.updateSessionStatus(sessionId, CallStatus.TERMINATED);
         callManager.destroySession(sessionId);
       }
 

@@ -2,6 +2,9 @@ import WebSocket from 'ws';
 import { config } from '../core/config';
 import { logger } from '../core/logger';
 import { SupabaseService } from './SupabaseService';
+import { CallManager } from '../core/CallManager';
+import { CallStatus } from '../types';
+import type { TenantSettings } from '../types/schema';
 
 interface GeminiSession {
   ws: WebSocket;
@@ -11,12 +14,21 @@ interface GeminiSession {
   lastActivity: number;
   audioQueue: Buffer[];
   toolCallInProgress: boolean;
+  pingInterval: NodeJS.Timeout | null;
+  retryCount: number;
+  t0Map: Map<string, number>; // Latency tracking: chunkId -> timestamp
 }
 
 export class AIService {
   private static instance: AIService;
   private sessions: Map<string, GeminiSession> = new Map();
   private supabase = SupabaseService.getInstance();
+  private callManager = CallManager.getInstance();
+
+  // Retry configuration
+  private readonly MAX_RETRIES = 5;
+  private readonly INITIAL_DELAY_MS = 500;
+  private readonly BACKOFF_MULTIPLIER = 1.5;
 
   private constructor() {
     // Singleton
@@ -29,88 +41,231 @@ export class AIService {
     return AIService.instance;
   }
 
+  /**
+   * Start a Gemini session with exponential backoff retry logic
+   */
   public async startSession(sessionId: string, tenantId: string): Promise<void> {
     try {
-      const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${config.GEMINI_API_KEY}`;
-
-      const ws = new WebSocket(wsUrl, {
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      });
-
-      const session: GeminiSession = {
-        ws,
-        sessionId,
-        tenantId,
-        isSetup: false,
-        lastActivity: Date.now(),
-        audioQueue: [],
-        toolCallInProgress: false
-      };
-
-      this.sessions.set(sessionId, session);
-
-      // Set up WebSocket event handlers
-      ws.on('open', () => {
-        logger.info({ sessionId }, 'Gemini WebSocket connected');
-        this.sendSetupMessage(session);
-      });
-
-      ws.on('message', (data: Buffer) => {
-        this.handleGeminiMessage(session, data);
-      });
-
-      ws.on('error', (error) => {
-        logger.error({ sessionId, error: error.message }, 'Gemini WebSocket error');
-      });
-
-      ws.on('close', () => {
-        logger.info({ sessionId }, 'Gemini WebSocket closed');
-        this.sessions.delete(sessionId);
-      });
-
-      // Keep-alive ping every 30 seconds
-      const pingInterval = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.ping();
-        } else {
-          clearInterval(pingInterval);
-        }
-      }, 30000);
-
+      await this.connectWithRetry(sessionId, tenantId, 0);
     } catch (error) {
       const err = error as Error;
-      logger.error({ sessionId, error: err.message }, 'Error starting Gemini session');
+      logger.error({ sessionId, error: err.message }, 'Failed to start Gemini session after retries');
+      this.callManager.updateSessionStatus(sessionId, CallStatus.TERMINATING);
       throw error;
     }
   }
 
-  private async sendSetupMessage(session: GeminiSession): Promise<void> {
-    // Get tenant settings for system instruction
-    const tenantData = await this.supabase.findTenantByPhoneNumber(''); // We need to get tenant settings
-    // For now, use placeholder - in real implementation, get from session metadata
+  /**
+   * Connect with exponential backoff retry
+   */
+  private async connectWithRetry(
+    sessionId: string,
+    tenantId: string,
+    attempt: number
+  ): Promise<void> {
+    if (attempt > this.MAX_RETRIES) {
+      throw new Error(`Max retries (${this.MAX_RETRIES}) exceeded for Gemini connection`);
+    }
 
+    const delay = this.INITIAL_DELAY_MS * Math.pow(this.BACKOFF_MULTIPLIER, attempt);
+
+    if (attempt > 0) {
+      logger.info(
+        { sessionId, tenantId, attempt, delayMs: delay },
+        'Retrying Gemini connection with exponential backoff'
+      );
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+
+    try {
+      await this.openWebSocket(sessionId, tenantId, attempt);
+    } catch (error) {
+      const err = error as Error;
+      logger.warn(
+        { sessionId, tenantId, attempt, error: err.message },
+        'Gemini connection attempt failed'
+      );
+      await this.connectWithRetry(sessionId, tenantId, attempt + 1);
+    }
+  }
+
+  /**
+   * Open WebSocket connection to Gemini
+   */
+  private async openWebSocket(sessionId: string, tenantId: string, attempt: number): Promise<void> {
+    const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${config.GEMINI_API_KEY}`;
+
+    const ws = new WebSocket(wsUrl, {
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    return new Promise((resolve, reject) => {
+      const timeoutHandle = setTimeout(() => {
+        ws.close();
+        reject(new Error('WebSocket connection timeout'));
+      }, 10000); // 10 second timeout
+
+      ws.on('open', async () => {
+        clearTimeout(timeoutHandle);
+        logger.info(
+          { sessionId, tenantId, attempt },
+          'Gemini WebSocket connected'
+        );
+
+        const session: GeminiSession = {
+          ws,
+          sessionId,
+          tenantId,
+          isSetup: false,
+          lastActivity: Date.now(),
+          audioQueue: [],
+          toolCallInProgress: false,
+          pingInterval: null,
+          retryCount: attempt,
+          t0Map: new Map()
+        };
+
+        this.sessions.set(sessionId, session);
+
+        // Setup message handlers
+        ws.on('message', (data: Buffer) => {
+          this.handleGeminiMessage(session, data).catch(err => {
+            logger.error({ sessionId, error: err.message }, 'Error in handleGeminiMessage');
+          });
+        });
+
+        ws.on('error', (error) => {
+          logger.error({ sessionId, error: error.message }, 'Gemini WebSocket error');
+        });
+
+        ws.on('close', (code, reason) => {
+          logger.info({ sessionId, code, reason: reason.toString() }, 'Gemini WebSocket closed');
+          this.handleGeminiClose(sessionId, tenantId, code);
+        });
+
+        // Send setup message with tenant configuration
+        try {
+          const tenantSettings = await this.supabase.getTenantSettings(tenantId);
+          await this.sendSetupMessage(session, tenantSettings);
+          this.callManager.updateSessionStatus(sessionId, CallStatus.CONNECTED);
+        } catch (error) {
+          const err = error as Error;
+          logger.error({ sessionId, error: err.message }, 'Error sending setup message');
+          ws.close();
+          reject(error);
+          return;
+        }
+
+        // Start keep-alive ping
+        const pingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.ping();
+          } else {
+            clearInterval(pingInterval);
+          }
+        }, 30000);
+
+        session.pingInterval = pingInterval;
+
+        resolve();
+      });
+
+      ws.on('error', (error) => {
+        clearTimeout(timeoutHandle);
+        reject(error);
+      });
+    });
+  }
+
+  /**
+   * Handle WebSocket close event with proper error classification
+   */
+  private async handleGeminiClose(sessionId: string, tenantId: string, code: number): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (session?.pingInterval) {
+      clearInterval(session.pingInterval);
+    }
+    this.sessions.delete(sessionId);
+
+    // Classify close code and handle accordingly
+    if (code === 429) {
+      logger.warn({ sessionId, tenantId }, 'Rate limited (429) - attempt reconnect with backoff');
+      // In production, consider secondary API key here
+      await this.connectWithRetry(sessionId, tenantId, 0);
+    } else if (code === 503) {
+      logger.warn({ sessionId, tenantId }, 'Service unavailable (503) - send fallback message and retry');
+      // Send fallback TTS message to Telnyx
+      await this.sendFallbackMessage(sessionId, 'Sorry, ik heb even een kleine storing. Een momentje alstublieft.');
+      // Retry after 2 seconds
+      setTimeout(() => this.connectWithRetry(sessionId, tenantId, 0), 2000);
+    }
+  }
+
+  /**
+   * Send fallback message via local TTS (stub - would need TTS service)
+   */
+  private async sendFallbackMessage(sessionId: string, message: string): Promise<void> {
+    logger.info({ sessionId, message }, 'Would send fallback TTS message');
+    // TODO: Implement local TTS via Telnyx Synthesis API or similar
+  }
+
+  /**
+   * Build system instruction from tenant settings
+   */
+  private buildSystemInstruction(settings: TenantSettings): string {
+    const now = new Date().toLocaleString('nl-NL', {
+      timeZone: 'Europe/Amsterdam',
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+
+    const businessName = settings.business_name ?? 'de salon';
+    const aiName = settings.ai_name ?? 'Sophie';
+    const aiLanguage = settings.ai_language ?? 'Nederlands';
+    const customInstructions = settings.custom_instructions ?? '';
+    const aiTone = settings.ai_tone ?? 'vriendelijk en professioneel';
+
+    return `Je bent ${aiName}, de AI-receptioniste van ${businessName}.
+Vandaag is ${now}.
+Je spreekt ${aiTone} in het ${aiLanguage}.
+Belangrijk: Spreek altijd kort, bondig en menselijk. Gebruik fillers zoals 'Uhm' of 'Even kijken hoor' wanneer je de agenda controleert.
+${customInstructions ? `Extra instructies: ${customInstructions}` : ''}
+Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken.`;
+  }
+
+  /**
+   * Send setup message to Gemini with dynamic tenant configuration
+   */
+  private async sendSetupMessage(
+    session: GeminiSession,
+    tenantSettings: TenantSettings
+  ): Promise<void> {
     const setupMessage = {
       setup: {
-        model: "models/gemini-2.0-flash-exp",
+        model: 'models/gemini-2.4-flash-live',
         generationConfig: {
-          responseModalities: ["audio"],
+          responseModalities: ['audio'],
           speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: {
-                voiceName: "Aoede"
+                voiceName: tenantSettings.ai_voice ?? 'Aoede'
               }
             }
           },
-          temperature: 0.7,
+          temperature: tenantSettings.ai_temperature ?? 0.7,
           topP: 0.95,
           topK: 40
         },
         systemInstruction: {
           parts: [
             {
-              text: `Je bent Sophie, de AI-receptioniste van een kapsalon. Vandaag is ${new Date().toLocaleDateString('nl-NL')}. Belangrijk: Je spreekt kort, bondig en menselijk in het Nederlands. Gebruik fillers zoals 'Uhm' of 'Even kijken hoor' tijdens het checken van de agenda. Als je een afspraak boekt, gebruik je ALTIJD de tools.`
+              text: this.buildSystemInstruction(tenantSettings)
             }
           ]
         },
@@ -118,30 +273,30 @@ export class AIService {
           {
             functionDeclarations: [
               {
-                name: "check_availability",
-                description: "Controleert beschikbare tijdsloten voor een specifieke behandeling en medewerker.",
+                name: 'check_availability',
+                description: 'Controleert beschikbare tijdsloten voor een specifieke behandeling en medewerker.',
                 parameters: {
-                  type: "OBJECT",
+                  type: 'OBJECT',
                   properties: {
-                    date: { type: "STRING", description: "ISO datum (YYYY-MM-DD)" },
-                    service_id: { type: "STRING" },
-                    employee_id: { type: "STRING", description: "Optioneel" }
+                    date: { type: 'STRING', description: 'ISO datum (YYYY-MM-DD)' },
+                    service_id: { type: 'STRING', description: 'Service ID' },
+                    employee_id: { type: 'STRING', description: 'Optioneel: Employee ID' }
                   },
-                  required: ["date", "service_id"]
+                  required: ['date', 'service_id']
                 }
               },
               {
-                name: "book_appointment",
-                description: "Maakt een definitieve boeking in de database.",
+                name: 'book_appointment',
+                description: 'Maakt een definitieve boeking in de database.',
                 parameters: {
-                  type: "OBJECT",
+                  type: 'OBJECT',
                   properties: {
-                    customer_phone: { type: "STRING" },
-                    start_time: { type: "STRING", description: "ISO timestamp" },
-                    service_id: { type: "STRING" },
-                    employee_id: { type: "STRING" }
+                    customer_phone: { type: 'STRING', description: 'Telefoonnummer klant' },
+                    start_time: { type: 'STRING', description: 'ISO timestamp' },
+                    service_id: { type: 'STRING', description: 'Service ID' },
+                    employee_id: { type: 'STRING', description: 'Employee ID' }
                   },
-                  required: ["customer_phone", "start_time", "service_id", "employee_id"]
+                  required: ['customer_phone', 'start_time', 'service_id', 'employee_id']
                 }
               }
             ]
@@ -152,61 +307,189 @@ export class AIService {
 
     session.ws.send(JSON.stringify(setupMessage));
     session.isSetup = true;
-    logger.info({ sessionId: session.sessionId }, 'Sent setup message to Gemini');
+
+    logger.info(
+      { sessionId: session.sessionId, tenantId: session.tenantId },
+      'Setup message sent to Gemini'
+    );
+
+    // Log setup trace
+    await this.supabase.insertCallTrace({
+      call_log_id: session.sessionId,
+      tenant_id: session.tenantId,
+      trace_type: 'SETUP_COMPLETE',
+      content: { model: 'gemini-2.4-flash-live' },
+      created_at: new Date().toISOString()
+    });
   }
 
+  /**
+   * Send audio to Gemini with latency tracking
+   */
   public sendAudio(sessionId: string, audioData: Buffer): void {
     const session = this.sessions.get(sessionId);
     if (!session || !session.isSetup) return;
+
+    const chunkId = `${sessionId}_${session.lastActivity}`;
+    const t0 = Date.now();
+    session.t0Map.set(chunkId, t0);
 
     const message = {
       realtimeInput: {
         mediaChunks: [
           {
-            mimeType: "audio/pcm;rate=16000",
+            mimeType: 'audio/pcm;rate=16000',
             data: audioData.toString('base64')
           }
         ]
       }
     };
 
-    session.ws.send(JSON.stringify(message));
-    session.lastActivity = Date.now();
+    try {
+      session.ws.send(JSON.stringify(message));
+      session.lastActivity = Date.now();
+    } catch (error) {
+      const err = error as Error;
+      logger.error({ sessionId, error: err.message }, 'Error sending audio to Gemini');
+    }
   }
 
+  /**
+   * Resample audio from 24kHz to 16kHz using linear interpolation
+   */
+  private resample24to16(input: Buffer): Buffer {
+    const inputSamples = input.length / 2; // 16-bit = 2 bytes per sample
+    const outputSamples = Math.floor(inputSamples * (16000 / 24000));
+    const output = Buffer.allocUnsafe(outputSamples * 2);
+
+    for (let i = 0; i < outputSamples; i++) {
+      const srcPos = (i * 24000) / 16000;
+      const srcIndex = Math.floor(srcPos);
+      const frac = srcPos - srcIndex;
+
+      const s0 = input.readInt16LE(srcIndex * 2);
+      const s1 =
+        srcIndex + 1 < inputSamples
+          ? input.readInt16LE((srcIndex + 1) * 2)
+          : s0;
+
+      const interpolated = Math.round(s0 + frac * (s1 - s0));
+      const clamped = Math.max(-32768, Math.min(32767, interpolated));
+      output.writeInt16LE(clamped, i * 2);
+    }
+
+    return output;
+  }
+
+  /**
+   * Handle messages from Gemini
+   */
   private async handleGeminiMessage(session: GeminiSession, data: Buffer): Promise<void> {
     try {
       const message = JSON.parse(data.toString());
       session.lastActivity = Date.now();
 
+      // Handle server content (audio output)
       if (message.serverContent) {
+        // Handle interruption
+        if (message.serverContent.interrupted) {
+          session.audioQueue = [];
+          this.callManager.updateSessionStatus(session.sessionId, CallStatus.USER_SPEAKING);
+
+          logger.info({ sessionId: session.sessionId }, 'Gemini interrupted - audio queue cleared');
+
+          await this.supabase.insertCallTrace({
+            call_log_id: session.sessionId,
+            tenant_id: session.tenantId,
+            trace_type: 'INTERRUPTION',
+            created_at: new Date().toISOString()
+          });
+          return;
+        }
+
+        // Handle safety blocks
+        if (message.serverContent.safetyRatings?.some((r: any) => r.blocked)) {
+          logger.warn(
+            { sessionId: session.sessionId, tenantId: session.tenantId },
+            'Gemini safety block triggered'
+          );
+
+          await this.supabase.insertCallTrace({
+            call_log_id: session.sessionId,
+            tenant_id: session.tenantId,
+            trace_type: 'SAFETY_BLOCK',
+            content: message.serverContent.safetyRatings,
+            created_at: new Date().toISOString()
+          });
+
+          // Send neutral response
+          const neutralMessage = {
+            text: 'Ik begrijp je niet helemaal. Laten we teruggaan naar je afspraak.'
+          };
+          session.ws.send(JSON.stringify(neutralMessage));
+          return;
+        }
+
         // Handle audio output
         if (message.serverContent.modelTurn?.parts) {
           for (const part of message.serverContent.modelTurn.parts) {
             if (part.inlineData?.mimeType?.startsWith('audio/')) {
-              const audioData = Buffer.from(part.inlineData.data, 'base64');
-              // TODO: Resample from 24kHz to 16kHz if needed
-              // Send to Telnyx via CallManager
-              const { CallManager } = await import('../core/CallManager');
-              const callManager = CallManager.getInstance();
-              callManager.sendAudioToTelnyx(session.sessionId, audioData.toString('base64'));
+              const rawAudio = Buffer.from(part.inlineData.data, 'base64');
+
+              // Resample 24kHz → 16kHz
+              const resampled = this.resample24to16(rawAudio);
+
+              // Calculate latency
+              const chunkId = `${session.sessionId}_${session.lastActivity}`;
+              const t0 = session.t0Map.get(chunkId);
+              const t1 = Date.now();
+              const latencyMs = t0 ? t1 - t0 : -1;
+
+              // Send to Telnyx
+              this.callManager.sendAudioToTelnyx(session.sessionId, resampled.toString('base64'));
+              this.callManager.updateSessionStatus(session.sessionId, CallStatus.AI_SPEAKING);
+
+              // Log latency trace
+              if (latencyMs >= 0) {
+                await this.supabase.insertCallTrace({
+                  call_log_id: session.sessionId,
+                  tenant_id: session.tenantId,
+                  trace_type: 'AUDIO_LATENCY',
+                  content: { latencyMs, chunkId },
+                  latency_ms: latencyMs,
+                  created_at: new Date().toISOString()
+                });
+
+                if (latencyMs > 400) {
+                  logger.warn(
+                    { sessionId: session.sessionId, latencyMs },
+                    'High latency detected (>400ms)'
+                  );
+                }
+              }
+
+              session.t0Map.delete(chunkId);
             }
           }
         }
-      } else if (message.toolCall) {
-        // Handle tool calls
+      }
+
+      // Handle tool calls
+      if (message.toolCall) {
         await this.handleToolCall(session, message.toolCall);
-      } else if (message.interrupted) {
-        // Handle interruption - clear audio queue
-        logger.info({ sessionId: session.sessionId }, 'Gemini interrupted - clearing audio queue');
-        // TODO: Clear Telnyx audio queue
       }
     } catch (error) {
       const err = error as Error;
-      logger.error({ sessionId: session.sessionId, error: err.message }, 'Error handling Gemini message');
+      logger.error(
+        { sessionId: session.sessionId, error: err.message },
+        'Error handling Gemini message'
+      );
     }
   }
 
+  /**
+   * Handle tool calls from Gemini
+   */
   private async handleToolCall(session: GeminiSession, toolCall: any): Promise<void> {
     if (session.toolCallInProgress) return; // Avoid concurrent tool calls
     session.toolCallInProgress = true;
@@ -215,11 +498,25 @@ export class AIService {
       for (const call of toolCall.functionCalls || []) {
         let result: any = {};
 
+        logger.info(
+          { sessionId: session.sessionId, toolName: call.name },
+          'Processing tool call'
+        );
+
         if (call.name === 'check_availability') {
-          result = await this.checkAvailability(session.tenantId, call.args);
+          result = await this.handleCheckAvailability(session.tenantId, call.args);
         } else if (call.name === 'book_appointment') {
-          result = await this.bookAppointment(session.tenantId, call.args);
+          result = await this.handleBookAppointment(session.tenantId, call.args);
         }
+
+        // Log tool call trace
+        await this.supabase.insertCallTrace({
+          call_log_id: session.sessionId,
+          tenant_id: session.tenantId,
+          trace_type: 'TOOL_CALL',
+          content: { tool: call.name, args: call.args, result },
+          created_at: new Date().toISOString()
+        });
 
         // Send tool response back to Gemini
         const responseMessage = {
@@ -238,66 +535,102 @@ export class AIService {
       }
     } catch (error) {
       const err = error as Error;
-      logger.error({ sessionId: session.sessionId, error: err.message }, 'Error handling tool call');
+      logger.error(
+        { sessionId: session.sessionId, error: err.message },
+        'Error handling tool call'
+      );
     } finally {
       session.toolCallInProgress = false;
     }
   }
 
-  private async checkAvailability(tenantId: string, args: any): Promise<any> {
+  /**
+   * Handle check_availability tool call
+   */
+  private async handleCheckAvailability(tenantId: string, args: any): Promise<any> {
     try {
       const { date, service_id, employee_id } = args;
 
-      const availableSlots = await this.supabase.checkAvailability(tenantId, date, service_id, employee_id);
+      const availableSlots = await this.supabase.checkAvailability(
+        tenantId,
+        service_id,
+        date,
+        employee_id
+      );
 
       return {
-        result: "success",
+        result: 'success',
         available_slots: availableSlots,
-        date: date,
-        service_id: service_id
+        date,
+        service_id
       };
     } catch (error) {
-      logger.error({ tenantId, error: (error as Error).message }, 'Error checking availability');
-      return { result: "error", message: "Could not check availability" };
+      logger.error(
+        { tenantId, error: (error as Error).message },
+        'Error checking availability'
+      );
+      return {
+        result: 'error',
+        message: 'Kon beschikbaarheid niet controleren'
+      };
     }
   }
 
-  private async bookAppointment(tenantId: string, args: any): Promise<any> {
+  /**
+   * Handle book_appointment tool call
+   */
+  private async handleBookAppointment(tenantId: string, args: any): Promise<any> {
     try {
       const { customer_phone, start_time, service_id, employee_id } = args;
 
-      const result = await this.supabase.bookAppointment(tenantId, customer_phone, start_time, service_id, employee_id);
+      const result = await this.supabase.bookAppointment(tenantId, {
+        customerPhone: customer_phone,
+        startTime: start_time,
+        serviceId: service_id,
+        employeeId: employee_id
+      });
 
       return {
-        result: "success",
-        appointment_id: result.appointment_id,
-        confirmation_message: result.message,
-        customer_phone: customer_phone
+        result: 'success',
+        appointment_id: result.id,
+        confirmation_message: `Je afspraak is geboekt op ${start_time}`,
+        customer_phone
       };
     } catch (error) {
-      logger.error({ tenantId, error: (error as Error).message }, 'Error booking appointment');
-      return { result: "error", message: "Could not book appointment" };
+      logger.error(
+        { tenantId, error: (error as Error).message },
+        'Error booking appointment'
+      );
+      return {
+        result: 'error',
+        message: 'Kon afspraak niet boeken'
+      };
     }
   }
 
+  /**
+   * End a Gemini session
+   */
   public endSession(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (session) {
+      if (session.pingInterval) {
+        clearInterval(session.pingInterval);
+      }
       session.ws.close();
       this.sessions.delete(sessionId);
+
+      logger.info({ sessionId }, 'Gemini session ended');
     }
   }
 
-  // Legacy method for compatibility
+  // Legacy methods for compatibility
   public async processAudio(audioData: Buffer, sessionId: string): Promise<string> {
-    // Forward to Gemini session
     this.sendAudio(sessionId, audioData);
-    return 'Audio sent to AI'; // This is now async
+    return 'Audio sent to AI';
   }
 
-  public async generateResponse(text: string, _context?: any): Promise<string> {
-    // For non-realtime responses, use regular Gemini API
-    // TODO: Implement if needed
+  public async generateResponse(_text: string, _context?: any): Promise<string> {
     return 'Response generated';
   }
 }

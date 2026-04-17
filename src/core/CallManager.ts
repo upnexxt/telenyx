@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import WebSocket from 'ws';
 import { CallSession, CallStatus, CallEventData } from '../types';
 
 export class CallManager extends EventEmitter {
