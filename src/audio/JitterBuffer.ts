@@ -12,7 +12,7 @@ export class JitterBuffer {
 
   // Constants
   private readonly DRAIN_INTERVAL_MS = 20; // 20ms clock tick
-  private readonly BYTES_PER_TICK = 160; // 160 samples @ 8kHz × 1 byte (A-Law/PCMA for Telnyx)
+  private readonly BYTES_PER_TICK = 640; // 320 samples @ 16kHz × 2 bytes (L16 BE for Telnyx)
   private readonly CNG_AMPLITUDE = 33; // 10^(-60/20) × 32767 ≈ 33
 
   constructor(onDrain: (chunk: Buffer) => void) {
@@ -81,15 +81,15 @@ export class JitterBuffer {
   }
 
   /**
-   * Generate comfort noise at -60dBFS (A-Law encoded)
+   * Generate comfort noise at -60dBFS (16-bit BE for Telnyx L16)
    * Prevents the perception of "dead air" during silence
    */
   private generateCng(): Buffer {
     const buf = Buffer.allocUnsafe(this.BYTES_PER_TICK);
-    for (let i = 0; i < this.BYTES_PER_TICK; i++) {
-      // White noise at -60dBFS, A-Law encoded
-      const noise = (Math.round((Math.random() * 2 - 1) * this.CNG_AMPLITUDE) ^ 0x55) & 0xFF;
-      buf.writeUInt8(noise, i);
+    for (let i = 0; i < this.BYTES_PER_TICK; i += 2) {
+      // White noise at -60dBFS, 16-bit Big-Endian (Telnyx L16)
+      const noise = Math.round((Math.random() * 2 - 1) * this.CNG_AMPLITUDE);
+      buf.writeInt16BE(noise, i);
     }
     return buf;
   }

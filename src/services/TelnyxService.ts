@@ -49,9 +49,8 @@ export class TelnyxService {
       await this.client.calls.actions.startStreaming(callControlId, {
         stream_url: websocketUrl,
         stream_track: 'both_tracks',
-        stream_codec: 'L16',
         stream_bidirectional_mode: 'rtp',
-        stream_bidirectional_codec: 'PCMA'
+        stream_bidirectional_codec: 'L16'
       });
       return true;
     } catch (error) {

@@ -25,8 +25,8 @@ export class AudioPipeline {
   private jitterBuffers: Map<string, JitterBuffer> = new Map();
 
   // DC Offset Filter: first-order high-pass at 80Hz
-  // alpha = exp(-2π × fc / fs) where fc=80Hz, fs=8000Hz ≈ 0.9391 (input is 8kHz from Telnyx)
-  private readonly ALPHA_DC = 0.9391;
+  // alpha = exp(-2π × fc / fs) where fc=80Hz, fs=16000Hz ≈ 0.9691 (Telnyx L16 sends 16kHz)
+  private readonly ALPHA_DC = 0.9691;
 
   // Soft limiter gain: -3dB = 10^(-3/20) ≈ 0.7079
   private readonly SOFT_LIMIT_GAIN = 0.7079;
@@ -47,7 +47,7 @@ export class AudioPipeline {
 
   /**
    * Inbound audio processing: Telnyx → Gemini
-   * Steps: swap16 (BE→LE), DC offset removal, echo suppression, upsample 8kHz→16kHz
+   * Telnyx L16 bidirectional sends 16kHz BE — swap to LE, filter, pass directly to Gemini (no upsampling needed)
    */
   public processInbound(
     base64Audio: string,
@@ -57,33 +57,22 @@ export class AudioPipeline {
     const buffer = Buffer.from(base64Audio, 'base64');
 
     // Step 1: Endianness swap (Big-Endian → Little-Endian)
-    // Telnyx sends L16 in network byte order (BE), Gemini expects LE
     buffer.swap16();
 
-    // Step 2: DC offset removal (high-pass filter at 80Hz @ 8kHz input)
+    // Step 2: DC offset removal (high-pass filter at 80Hz @ 16kHz)
     this.removeDcOffset(buffer, dcState);
 
-    // Step 3: Echo suppression
+    // Step 3: Echo suppression (-6dB when AI is speaking)
     if (isAiSpeaking) {
       this.applyEchoSuppression(buffer);
     }
 
-    // Step 4: Upsample 8kHz → 16kHz via linear interpolation (Gemini requires 16kHz)
-    const inputSamples = buffer.length / 2;
-    const output = Buffer.allocUnsafe(inputSamples * 4);
-    for (let i = 0; i < inputSamples; i++) {
-      const s0 = buffer.readInt16LE(i * 2);
-      const s1 = i + 1 < inputSamples ? buffer.readInt16LE((i + 1) * 2) : s0;
-      output.writeInt16LE(s0, i * 4);
-      output.writeInt16LE(Math.round((s0 + s1) / 2), i * 4 + 2);
-    }
-
-    return output;
+    return buffer; // Already 16kHz LE — exactly what Gemini expects
   }
 
   /**
    * Outbound audio processing: Gemini → Telnyx
-   * Steps: soft limiter, downsample 24kHz→8kHz, encode to A-Law (PCMA)
+   * Steps: soft limiter, downsample 24kHz→16kHz (3:2), swap LE→BE for Telnyx L16
    * Output goes to JitterBuffer for paced Telnyx delivery
    */
   public processOutbound(
@@ -96,19 +85,20 @@ export class AudioPipeline {
     // Step 1: Soft limiter (-3dB gain) to prevent clipping
     const limited = this.applySoftLimiter(rawAudio);
 
-    // Step 2: Downsample 24kHz → 8kHz (average triplets) and encode to A-Law
+    // Step 2: Downsample 24kHz → 16kHz (3:2 ratio — keep s0, interpolate s1+s2)
     const inputSamples = limited.length / 2;
-    const outputSamples = Math.floor(inputSamples / 3);
-    const output = Buffer.allocUnsafe(outputSamples); // 1 byte per A-Law sample
+    const outputSamples = Math.floor(inputSamples * 2 / 3);
+    const output = Buffer.allocUnsafe(outputSamples * 2);
 
     let outIdx = 0;
     for (let i = 0; i < inputSamples - 2; i += 3) {
       const s0 = limited.readInt16LE(i * 2);
       const s1 = limited.readInt16LE((i + 1) * 2);
       const s2 = limited.readInt16LE((i + 2) * 2);
-      const avg = Math.round((s0 + s1 + s2) / 3);
-      output.writeUInt8(this.pcmToALaw(avg), outIdx);
-      outIdx++;
+      // Write as BE (Telnyx L16 requires network byte order)
+      output.writeInt16BE(s0, outIdx);
+      output.writeInt16BE(Math.max(-32768, Math.min(32767, Math.round((s1 + s2) / 2))), outIdx + 2);
+      outIdx += 4;
     }
 
     // Step 3: Push to jitter buffer for timed output
@@ -116,22 +106,6 @@ export class AudioPipeline {
     if (jb) {
       jb.push(output.subarray(0, outIdx));
     }
-  }
-
-  private pcmToALaw(sample: number): number {
-    const QUANT_MASK = 0xf;
-    const SEG_SHIFT = 4;
-    const sign = (sample >> 8) & 0x80;
-
-    if (sign !== 0) sample = -sample;
-    if (sample > 32635) sample = 32635;
-
-    let exponent = 7;
-    for (let i = 0; i < 8; i++) {
-      if (sample <= (0xff << i)) { exponent = 7 - i; break; }
-    }
-    const mantissa = (sample >> (exponent + 3)) & QUANT_MASK;
-    return ((sign | (exponent << SEG_SHIFT) | mantissa) ^ 0x55) & 0xff;
   }
 
   /**
@@ -191,7 +165,7 @@ export class AudioPipeline {
    * Removes low-frequency rumble and DC bias from audio signal
    *
    * y[n] = alpha × (y[n-1] + x[n] - x[n-1])
-   * where alpha ≈ 0.9391 for fc=80Hz at fs=8kHz (Telnyx input rate)
+   * where alpha ≈ 0.9691 for fc=80Hz at fs=16kHz (Telnyx L16 input rate)
    */
   private removeDcOffset(buffer: Buffer, state: DcFilterState): void {
     const samples = buffer.length / 2;
