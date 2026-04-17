@@ -125,7 +125,8 @@ export class CallManager extends EventEmitter {
       ws.send(JSON.stringify(message));
       return true;
     } catch (error) {
-      console.error('Error sending audio to Telnyx:', error);
+      const err = error as Error;
+      logger.error({ sessionId, error: err.message }, 'Error sending audio to Telnyx');
       return false;
     }
   }

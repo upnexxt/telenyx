@@ -2943,6 +2943,37 @@ export type CompositeTypes<
     ? DefaultSchema["CompositeTypes"][PublicCompositeTypeNameOrOptions]
     : never
 
+/**
+ * Tenant Settings - Dynamic AI configuration per tenant
+ */
+export interface TenantSettings {
+  tenant_id: string;
+  ai_name?: string;
+  ai_voice?: string;
+  ai_language?: string;
+  ai_tone?: string;
+  ai_temperature?: number;
+  business_name?: string;
+  custom_instructions?: string;
+}
+
+/**
+ * Call Trace - Audit log for call events
+ */
+export interface CallTrace {
+  call_log_id: string;
+  tenant_id: string;
+  step_type: string;
+  content?: any;
+  latency_ms?: number;
+  created_at?: string;
+}
+
+/**
+ * Tables type export for Supabase client
+ */
+export type Tables = Database['public']['Tables'];
+
 export const Constants = {
   public: {
     Enums: {
