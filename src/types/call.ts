@@ -1,3 +1,5 @@
+import type { AudioDspState } from '../audio/AudioPipeline';
+
 export interface CallSession {
   id: string;
   tenantId: string;
@@ -7,6 +9,7 @@ export interface CallSession {
   createdAt: Date;
   lastActivity: Date;
   metadata: Record<string, any>;
+  dspState?: AudioDspState;
 }
 
 export enum CallStatus {

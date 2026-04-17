@@ -5,6 +5,7 @@ import { SupabaseService } from './SupabaseService';
 import { CallManager } from '../core/CallManager';
 import { CallStatus } from '../types';
 import type { TenantSettings } from '../types/schema';
+import { AudioPipeline } from '../audio/AudioPipeline';
 
 interface GeminiSession {
   ws: WebSocket;
@@ -317,8 +318,8 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
     await this.supabase.insertCallTrace({
       call_log_id: session.sessionId,
       tenant_id: session.tenantId,
-      trace_type: 'SETUP_COMPLETE',
-      content: { model: 'gemini-2.4-flash-live' },
+      step_type: 'AI_METADATA',
+      content: { model: 'gemini-2.4-flash-live', event: 'setup_complete' },
       created_at: new Date().toISOString()
     });
   }
@@ -355,33 +356,6 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
   }
 
   /**
-   * Resample audio from 24kHz to 16kHz using linear interpolation
-   */
-  private resample24to16(input: Buffer): Buffer {
-    const inputSamples = input.length / 2; // 16-bit = 2 bytes per sample
-    const outputSamples = Math.floor(inputSamples * (16000 / 24000));
-    const output = Buffer.allocUnsafe(outputSamples * 2);
-
-    for (let i = 0; i < outputSamples; i++) {
-      const srcPos = (i * 24000) / 16000;
-      const srcIndex = Math.floor(srcPos);
-      const frac = srcPos - srcIndex;
-
-      const s0 = input.readInt16LE(srcIndex * 2);
-      const s1 =
-        srcIndex + 1 < inputSamples
-          ? input.readInt16LE((srcIndex + 1) * 2)
-          : s0;
-
-      const interpolated = Math.round(s0 + frac * (s1 - s0));
-      const clamped = Math.max(-32768, Math.min(32767, interpolated));
-      output.writeInt16LE(clamped, i * 2);
-    }
-
-    return output;
-  }
-
-  /**
    * Handle messages from Gemini
    */
   private async handleGeminiMessage(session: GeminiSession, data: Buffer): Promise<void> {
@@ -401,7 +375,8 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
           await this.supabase.insertCallTrace({
             call_log_id: session.sessionId,
             tenant_id: session.tenantId,
-            trace_type: 'INTERRUPTION',
+            step_type: 'SYSTEM_ERROR',
+            content: { event: 'interruption_triggered' },
             created_at: new Date().toISOString()
           });
           return;
@@ -417,8 +392,8 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
           await this.supabase.insertCallTrace({
             call_log_id: session.sessionId,
             tenant_id: session.tenantId,
-            trace_type: 'SAFETY_BLOCK',
-            content: message.serverContent.safetyRatings,
+            step_type: 'SYSTEM_ERROR',
+            content: { event: 'safety_block_triggered', safetyRatings: message.serverContent.safetyRatings },
             created_at: new Date().toISOString()
           });
 
@@ -432,21 +407,26 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
 
         // Handle audio output
         if (message.serverContent.modelTurn?.parts) {
+          const pipeline = AudioPipeline.getInstance();
           for (const part of message.serverContent.modelTurn.parts) {
             if (part.inlineData?.mimeType?.startsWith('audio/')) {
-              const rawAudio = Buffer.from(part.inlineData.data, 'base64');
+              // Process through DSP pipeline:
+              // - Soft limiter (-3dB)
+              // - Anti-aliasing FIR filter (8kHz)
+              // - Polyphase downsample 24kHz → 16kHz
+              // - Push to jitter buffer for paced output
+              const firState = session.dspState?.firOut;
+              if (firState) {
+                pipeline.processOutbound(part.inlineData.data, session.sessionId, firState);
+              }
 
-              // Resample 24kHz → 16kHz
-              const resampled = this.resample24to16(rawAudio);
-
-              // Calculate latency
+              // Calculate latency (T0/T1 tracking)
               const chunkId = `${session.sessionId}_${session.lastActivity}`;
               const t0 = session.t0Map.get(chunkId);
               const t1 = Date.now();
               const latencyMs = t0 ? t1 - t0 : -1;
 
-              // Send to Telnyx
-              this.callManager.sendAudioToTelnyx(session.sessionId, resampled.toString('base64'));
+              // Update session status
               this.callManager.updateSessionStatus(session.sessionId, CallStatus.AI_SPEAKING);
 
               // Log latency trace
@@ -454,9 +434,8 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
                 await this.supabase.insertCallTrace({
                   call_log_id: session.sessionId,
                   tenant_id: session.tenantId,
-                  trace_type: 'AUDIO_LATENCY',
+                  step_type: 'AUDIO_LATENCY',
                   content: { latencyMs, chunkId },
-                  latency_ms: latencyMs,
                   created_at: new Date().toISOString()
                 });
 
@@ -513,7 +492,7 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
         await this.supabase.insertCallTrace({
           call_log_id: session.sessionId,
           tenant_id: session.tenantId,
-          trace_type: 'TOOL_CALL',
+          step_type: 'TOOL_CALL',
           content: { tool: call.name, args: call.args, result },
           created_at: new Date().toISOString()
         });

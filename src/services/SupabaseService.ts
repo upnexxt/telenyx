@@ -276,22 +276,21 @@ export class SupabaseService {
 
   /**
    * Insert call trace for monitoring and debugging
+   * Maps to the call_traces table with step_type (not trace_type)
    */
   public async insertCallTrace(trace: {
     call_log_id: string;
     tenant_id: string;
-    trace_type: string;
+    step_type: string;
     content?: any;
-    latency_ms?: number;
     created_at?: string;
   }): Promise<void> {
     try {
       const { error } = await this.client.from('call_traces').insert({
         call_log_id: trace.call_log_id,
         tenant_id: trace.tenant_id,
-        trace_type: trace.trace_type,
+        step_type: trace.step_type,
         content: trace.content || {},
-        latency_ms: trace.latency_ms,
         created_at: trace.created_at || new Date().toISOString()
       });
 
@@ -304,7 +303,7 @@ export class SupabaseService {
       }
 
       logger.debug(
-        { callLogId: trace.call_log_id, traceType: trace.trace_type },
+        { callLogId: trace.call_log_id, stepType: trace.step_type },
         'Call trace inserted'
       );
     } catch (error) {

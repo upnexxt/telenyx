@@ -32,7 +32,12 @@ export class CallManager extends EventEmitter {
       status: CallStatus.INITIALIZING,
       createdAt: new Date(),
       lastActivity: new Date(),
-      metadata
+      metadata,
+      // Initialize DSP state for audio processing
+      dspState: {
+        dcIn: { prevIn: 0, prevOut: 0 },
+        firOut: { history: new Array(6).fill(0) }
+      }
     };
 
     this.sessions.set(session.id, session);

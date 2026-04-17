@@ -9,6 +9,7 @@ import { correlationIdMiddleware } from './api/middleware';
 import { telnyxWebhookRouter } from './api/routes/telnyxWebhook';
 import { AIService } from './services/AIService';
 import { SupabaseService } from './services/SupabaseService';
+import { AudioPipeline } from './audio/AudioPipeline';
 
 const app = express();
 const server = http.createServer(app);
@@ -96,7 +97,7 @@ wss.on('connection', (ws, req) => {
       const message = JSON.parse(data.toString());
 
       if (message.event === 'media') {
-        // Process incoming audio from Telnyx
+        // Process incoming audio from Telnyx → Gemini via DSP pipeline
         const audioPayload = message.media.payload;
 
         logCallEvent('info', 'Received media frame from Telnyx', {
@@ -105,18 +106,30 @@ wss.on('connection', (ws, req) => {
           payloadLength: audioPayload.length
         });
 
-        // Forward audio to Gemini AI
+        // Apply DSP transformations and forward to Gemini
         try {
           const aiService = AIService.getInstance();
-          const audioBuffer = Buffer.from(audioPayload, 'base64');
+          const pipeline = AudioPipeline.getInstance();
+          const dspState = session.dspState;
 
-          // Send audio chunk to Gemini (every 100-200ms as received)
-          aiService.sendAudio(sessionId, audioBuffer);
+          if (!dspState) {
+            throw new Error('DSP state not initialized for session');
+          }
+
+          // Process inbound audio through DSP pipeline:
+          // - Swap16 (BE → LE endianness)
+          // - DC offset removal (high-pass at 80Hz)
+          // - Echo suppression (if AI is speaking)
+          const isAiSpeaking = session.status === CallStatus.AI_SPEAKING;
+          const processed = pipeline.processInbound(audioPayload, dspState.dcIn, isAiSpeaking);
+
+          // Send to Gemini
+          aiService.sendAudio(sessionId, processed);
 
           logCallEvent('info', 'Sent audio chunk to Gemini', {
             sessionId,
             tenantId,
-            chunkSize: audioBuffer.length
+            chunkSize: processed.length
           });
 
         } catch (error) {
@@ -125,7 +138,7 @@ wss.on('connection', (ws, req) => {
             sessionId,
             tenantId,
             error: err.message
-          }, 'Error processing audio with AI');
+          }, 'Error processing inbound audio');
         }
 
       } else if (message.event === 'connected') {
@@ -136,6 +149,13 @@ wss.on('connection', (ws, req) => {
 
         // Update session status
         callManager.updateSessionStatus(sessionId, CallStatus.CONNECTED);
+
+        // Initialize DSP jitter buffer with drain callback
+        const pipeline = AudioPipeline.getInstance();
+        pipeline.createJitterBuffer(sessionId, (chunk: Buffer) => {
+          // Drain callback: send 20ms chunk to Telnyx
+          callManager.sendAudioToTelnyx(sessionId, chunk.toString('base64'));
+        });
 
         // Initialize call log
         const supabase = SupabaseService.getInstance();
@@ -167,6 +187,10 @@ wss.on('connection', (ws, req) => {
 
         // Update session status
         callManager.updateSessionStatus(sessionId, CallStatus.TERMINATING);
+
+        // Destroy DSP jitter buffer
+        const pipeline = AudioPipeline.getInstance();
+        pipeline.destroyJitterBuffer(sessionId);
 
         // Finalize call log and billing
         const supabase = SupabaseService.getInstance();
