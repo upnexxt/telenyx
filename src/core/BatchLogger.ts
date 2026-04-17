@@ -82,9 +82,18 @@ export class BatchLogger {
 
     try {
       // Bulk insert via Supabase (single RPC/HTTP call)
+      // Ensure all required fields are present with defaults
+      const itemsForInsert = items.map(item => ({
+        call_log_id: item.call_log_id,
+        tenant_id: item.tenant_id,
+        step_type: item.step_type as any,
+        content: item.content || {},
+        created_at: item.created_at || new Date().toISOString()
+      }));
+
       const { error } = await this.supabase.getClient()
         .from('call_traces')
-        .insert(items);
+        .insert(itemsForInsert as any);
 
       if (error) {
         logger.error(

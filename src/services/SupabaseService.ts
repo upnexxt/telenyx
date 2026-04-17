@@ -126,10 +126,16 @@ export class SupabaseService {
     params: BookingParams
   ): Promise<any> {
     try {
+      // Calculate end time (1 hour after start)
+      const startDate = new Date(params.startTime);
+      const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
+      const endTime = endDate.toISOString();
+
       const { data, error } = await this.client.rpc('book_appointment_atomic', {
         p_tenant_id: tenantId,
         p_customer_id: params.customerPhone,
         p_start_time: params.startTime,
+        p_end_time: endTime,
         p_service_id: params.serviceId,
         p_employee_id: params.employeeId
       });

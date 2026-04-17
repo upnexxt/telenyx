@@ -4,7 +4,6 @@
  * Target latency: <10ms processing per chunk, <50ms with jitter buffer
  */
 
-import { BufferPool } from './BufferPool';
 import { JitterBuffer } from './JitterBuffer';
 
 export interface DcFilterState {
