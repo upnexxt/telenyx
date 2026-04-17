@@ -144,7 +144,15 @@ router.post('/inbound', async (req, res) => {
     const protocol = req.headers['x-forwarded-proto'] === 'https' || 
                      req.headers.host?.includes('.trycloudflare.com') ||
                      req.headers.host?.includes('.ngrok') ? 'wss' : 'ws';
-    const websocketUrl = `${protocol}://${req.headers.host}/media?sessionId=${sessionId}&tenantId=${tenantId}`;
+    const host = req.headers.host;
+    const websocketUrl = `${protocol}://${host}/media?sessionId=${sessionId}&tenantId=${tenantId}`;
+
+    logger.info({ 
+      correlationId, 
+      websocketUrl, 
+      host, 
+      xForwardedProto: req.headers['x-forwarded-proto'] 
+    }, 'Generated WebSocket URL for Telnyx');
 
     res.set('Content-Type', 'text/xml');
     res.send(`<?xml version="1.0" encoding="UTF-8"?>

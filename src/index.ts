@@ -61,6 +61,12 @@ app.get('/metrics', (_req, res) => {
 
 // WebSocket handling for media streams
 wss.on('connection', (ws, req) => {
+  logger.info({ 
+    url: req.url, 
+    headers: req.headers,
+    remoteAddress: req.socket.remoteAddress 
+  }, 'Incoming WebSocket connection attempt');
+
   if (isShuttingDown) {
     ws.close(1001, 'Server is shutting down');
     return;
