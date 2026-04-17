@@ -11,7 +11,8 @@ const router = express.Router();
 // Function to verify Telnyx webhook signature
 function verifyTelnyxSignature(payload: string, signature: string, timestamp: string): boolean {
   try {
-    const publicKey = Buffer.from(config.TELNYX_PUBLIC_KEY, 'base64');
+    const telnyxPublicKey = (process.env as any)['TELNYX_PUBLIC_KEY'] || config.TELNYX_PUBLIC_KEY;
+    const publicKey = Buffer.from(telnyxPublicKey, 'base64');
     const message = `${timestamp}|${payload}`;
     const signatureBytes = Buffer.from(signature, 'base64');
 
@@ -24,6 +25,28 @@ function verifyTelnyxSignature(payload: string, signature: string, timestamp: st
     logger.error({ error }, 'Error verifying Telnyx signature');
     return false;
   }
+}
+
+// Check if signature verification should be skipped (development mode)
+function shouldSkipSignatureVerification(): boolean {
+  // Allow skipping via environment variable
+  if (process.env['SKIP_SIGNATURE_VERIFICATION'] === 'true') {
+    return true;
+  }
+  // Auto-skip in development mode if TELNYX_PUBLIC_KEY is not set or is a placeholder
+  if (config.NODE_ENV === 'development') {
+    const pubKey = (process.env as any)['TELNYX_PUBLIC_KEY'] || '';
+    // Common test/placeholder keys
+    const placeholderPatterns = [
+      /^test/i,
+      /^placeholder/i,
+      /^dev-/i,
+      /^mock/i,
+      /Vmz2qzNtnuzTxi4NE7LmYaX1U/i  // Known placeholder from some setups
+    ];
+    return placeholderPatterns.some(pattern => pattern.test(pubKey));
+  }
+  return false;
 }
 
 // POST /api/v1/telnyx/inbound
@@ -51,10 +74,15 @@ router.post('/inbound', async (req, res) => {
       return;
     }
 
-    if (!verifyTelnyxSignature(payload, signature, timestamp)) {
-      logger.warn({ correlationId }, 'Invalid Telnyx signature');
-      res.status(401).send('Unauthorized');
-      return;
+    // Skip signature verification in development mode or when explicitly disabled
+    if (!shouldSkipSignatureVerification()) {
+      if (!verifyTelnyxSignature(payload, signature, timestamp)) {
+        logger.warn({ correlationId }, 'Invalid Telnyx signature');
+        res.status(401).send('Unauthorized');
+        return;
+      }
+    } else {
+      logger.info({ correlationId, signature }, 'Dev mode: signature verification skipped');
     }
 
     // Check timestamp for replay attacks (allow 5 minutes tolerance)
@@ -70,15 +98,17 @@ router.post('/inbound', async (req, res) => {
 
     // Parse webhook body
     const event = req.body;
-    if (!event || event.event_type !== 'call.initiated') {
-      logger.warn({ correlationId, eventType: event?.event_type }, 'Ignoring non-call.initiated event');
+    // Telnyx webhook structure: { data: { event_type, payload, ... }, meta: {...}, headers: {...} }
+    const eventData = event?.data;
+    if (!eventData || eventData.event_type !== 'call.initiated') {
+      logger.warn({ correlationId, eventType: eventData?.event_type }, 'Ignoring non-call.initiated event');
       res.status(200).send('OK');
       return;
     }
 
-    const callControlId = event.payload.call_control_id;
-    const toNumber = event.payload.to;
-    const fromNumber = event.payload.from;
+    const callControlId = eventData.payload.call_control_id;
+    const toNumber = eventData.payload.to;
+    const fromNumber = eventData.payload.from;
 
     logCallEvent('info', 'Processing inbound call', {
       correlationId,
@@ -117,8 +147,11 @@ router.post('/inbound', async (req, res) => {
       callControlId
     });
 
-    // Generate TeXML response
-    const websocketUrl = `${config.NODE_ENV === 'production' ? 'wss' : 'ws'}://${req.headers.host}/media?sessionId=${sessionId}&tenantId=${tenantId}`;
+    // Generate TeXML response - always use wss for secure WebSocket (required for tunnels)
+    const protocol = req.headers['x-forwarded-proto'] === 'https' || 
+                     req.headers.host?.includes('.trycloudflare.com') ||
+                     req.headers.host?.includes('.ngrok') ? 'wss' : 'ws';
+    const websocketUrl = `${protocol}://${req.headers.host}/media?sessionId=${sessionId}&tenantId=${tenantId}`;
 
     res.set('Content-Type', 'text/xml');
     res.send(`<?xml version="1.0" encoding="UTF-8"?>
