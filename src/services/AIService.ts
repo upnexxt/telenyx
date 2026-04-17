@@ -69,17 +69,25 @@ export class AIService {
    * A-Law decode: 8-bit compressed to 16-bit PCM (ITU-T G.711)
    */
   private aLawDecode(byte: number): number {
-    const sign = byte & 0x80;
-    let exponent = (byte & 0x70) >> 4;
-    let mantissa = byte & 0x0f;
+    // Apply bit inversion first (XOR 0x55)
+    byte ^= 0x55;
 
-    // Reconstruct 14-bit sample
-    let sample = (mantissa << 4) + 8; // Add bias
-    if (exponent !== 0) sample += 0x100 << exponent;
+    // Extract sign (bit 7) and components
+    const sign = (byte & 0x80) ? -1 : 1;
+    const exponent = (byte >> 4) & 0x07; // 3 bits
+    const mantissa = byte & 0x0f; // 4 bits
 
-    // Scale to 16-bit range
-    const result = (sample << 1) | ((byte ^ 0x55) & 1);
-    return sign ? -result : result;
+    // Reconstruct PCM value according to ITU-T G.711 standard
+    let pcm: number;
+    if (exponent === 0) {
+      // Linear segment
+      pcm = (mantissa << 4) + 8;
+    } else {
+      // Compressed segments - add implicit leading 1 bit to mantissa
+      pcm = ((mantissa | 0x10) << (exponent + 3)) - 128;
+    }
+
+    return sign * pcm;
   }
 
   /**
