@@ -6,6 +6,7 @@ import { CallManager } from '../core/CallManager';
 import { CallStatus } from '../types';
 import type { TenantSettings } from '../types/schema';
 import { AudioPipeline } from '../audio/AudioPipeline';
+import { BatchLogger } from '../core/BatchLogger';
 
 interface GeminiSession {
   ws: WebSocket;
@@ -314,13 +315,16 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
       'Setup message sent to Gemini'
     );
 
-    // Log setup trace
-    await this.supabase.insertCallTrace({
+    // Log setup trace via batch logger (async, non-blocking)
+    const batchLogger = BatchLogger.getInstance();
+    batchLogger.log({
       call_log_id: session.sessionId,
       tenant_id: session.tenantId,
       step_type: 'AI_METADATA',
       content: { model: 'gemini-2.4-flash-live', event: 'setup_complete' },
       created_at: new Date().toISOString()
+    }).catch(err => {
+      logger.error({ error: err.message }, 'Failed to log setup trace');
     });
   }
 
@@ -372,12 +376,15 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
 
           logger.info({ sessionId: session.sessionId }, 'Gemini interrupted - audio queue cleared');
 
-          await this.supabase.insertCallTrace({
+          const batchLogger = BatchLogger.getInstance();
+          batchLogger.log({
             call_log_id: session.sessionId,
             tenant_id: session.tenantId,
             step_type: 'SYSTEM_ERROR',
             content: { event: 'interruption_triggered' },
             created_at: new Date().toISOString()
+          }).catch(err => {
+            logger.error({ error: err.message }, 'Failed to log interruption trace');
           });
           return;
         }
@@ -389,12 +396,15 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
             'Gemini safety block triggered'
           );
 
-          await this.supabase.insertCallTrace({
+          const batchLogger = BatchLogger.getInstance();
+          batchLogger.log({
             call_log_id: session.sessionId,
             tenant_id: session.tenantId,
             step_type: 'SYSTEM_ERROR',
             content: { event: 'safety_block_triggered', safetyRatings: message.serverContent.safetyRatings },
             created_at: new Date().toISOString()
+          }).catch(err => {
+            logger.error({ error: err.message }, 'Failed to log safety block trace');
           });
 
           // Send neutral response
@@ -429,14 +439,17 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
               // Update session status
               this.callManager.updateSessionStatus(session.sessionId, CallStatus.AI_SPEAKING);
 
-              // Log latency trace
+              // Log latency trace via batch logger (async, non-blocking)
               if (latencyMs >= 0) {
-                await this.supabase.insertCallTrace({
+                const batchLogger = BatchLogger.getInstance();
+                batchLogger.log({
                   call_log_id: session.sessionId,
                   tenant_id: session.tenantId,
-                  step_type: 'AUDIO_LATENCY',
-                  content: { latencyMs, chunkId },
+                  step_type: 'AI_METADATA',
+                  content: { latency_ms: latencyMs, chunkId },
                   created_at: new Date().toISOString()
+                }).catch(err => {
+                  logger.error({ error: err.message }, 'Failed to log latency trace');
                 });
 
                 if (latencyMs > 400) {
@@ -488,13 +501,16 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
           result = await this.handleBookAppointment(session.tenantId, call.args);
         }
 
-        // Log tool call trace
-        await this.supabase.insertCallTrace({
+        // Log tool call trace via batch logger (async, non-blocking)
+        const batchLogger = BatchLogger.getInstance();
+        batchLogger.log({
           call_log_id: session.sessionId,
           tenant_id: session.tenantId,
           step_type: 'TOOL_CALL',
           content: { tool: call.name, args: call.args, result },
           created_at: new Date().toISOString()
+        }).catch(err => {
+          logger.error({ error: err.message }, 'Failed to log tool call trace');
         });
 
         // Send tool response back to Gemini

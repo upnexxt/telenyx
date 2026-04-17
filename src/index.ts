@@ -10,12 +10,16 @@ import { telnyxWebhookRouter } from './api/routes/telnyxWebhook';
 import { AIService } from './services/AIService';
 import { SupabaseService } from './services/SupabaseService';
 import { AudioPipeline } from './audio/AudioPipeline';
+import { EventLoopMonitor } from './core/EventLoopMonitor';
+import { BatchLogger } from './core/BatchLogger';
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 const callManager = CallManager.getInstance();
+const eventLoopMonitor = EventLoopMonitor.getInstance(); // Initialize system health monitoring
+const batchLogger = BatchLogger.getInstance(); // Initialize async batch logging
 let isShuttingDown = false;
 
 // Middleware
@@ -266,19 +270,24 @@ setInterval(() => {
 }, TIMEOUT_CHECK_INTERVAL);
 
 // Graceful shutdown
-const gracefulShutdown = (signal: string) => {
+const gracefulShutdown = async (signal: string) => {
   logger.info({ signal }, 'Received shutdown signal, starting graceful shutdown');
 
   isShuttingDown = true;
+  eventLoopMonitor.stop();
 
   // Stop accepting new connections
-  server.close((err) => {
+  server.close(async (err) => {
     if (err) {
       logger.error({ err }, 'Error closing server');
       process.exit(1);
     }
 
     logger.info('Server closed, waiting for active calls to complete');
+
+    // Flush pending traces
+    logger.info('Flushing pending traces...');
+    await batchLogger.flushNow();
 
     // Wait for active calls to complete
     const checkInterval = setInterval(() => {
