@@ -45,10 +45,11 @@ export class TelnyxService {
   public async startStream(callControlId: string, websocketUrl: string): Promise<boolean> {
     try {
       logger.info(`Starting bidirectional media stream (ID: ${callControlId}, URL: ${websocketUrl})`);
-      // ✅ FIX: Changed from streamingStart to startStreaming
+      // ✅ FIX: Changed from streamingStart to startStreaming, added L16 codec
       await this.client.calls.actions.startStreaming(callControlId, {
         stream_url: websocketUrl,
-        stream_track: 'both_tracks'
+        stream_track: 'both_tracks',
+        stream_codec: 'L16'
       });
       return true;
     } catch (error) {

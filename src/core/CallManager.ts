@@ -117,6 +117,7 @@ export class CallManager extends EventEmitter {
 
     const message = {
       event: 'media',
+      stream_id: session.metadata['streamId'], // ✅ Include stream_id
       media: {
         payload: audioPayload
       }

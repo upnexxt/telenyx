@@ -124,11 +124,7 @@ wss.on('connection', (ws, req) => {
         // Process incoming audio from Telnyx → Gemini via DSP pipeline
         const audioPayload = message.media.payload;
 
-        logCallEvent('info', 'Received media frame from Telnyx', {
-          sessionId,
-          tenantId,
-          payloadLength: audioPayload.length
-        });
+        // ✅ Logger removed to prevent spam and event loop lag
 
         // Apply DSP transformations and forward to Gemini
         try {
@@ -150,11 +146,8 @@ wss.on('connection', (ws, req) => {
           // Send to Gemini
           aiService.sendAudio(sessionId, processed);
 
-          logCallEvent('info', 'Sent audio chunk to Gemini', {
-            sessionId,
-            tenantId,
-            chunkSize: processed.length
-          });
+          // Send to Gemini
+          aiService.sendAudio(sessionId, processed);
 
         } catch (error) {
           const err = error as Error;
@@ -165,7 +158,13 @@ wss.on('connection', (ws, req) => {
           }, 'Error processing inbound audio');
         }
 
-      } else if (message.event === 'connected') {
+      } else if (message.event === 'start' || message.event === 'connected') {
+        const streamId = message.stream_id || (message.start ? message.start.stream_id : null);
+        if (streamId) {
+          session.metadata['streamId'] = streamId;
+          logger.info(`Telnyx stream started with ID: ${streamId}`);
+        }
+
         logCallEvent('info', 'Media stream connected', {
           sessionId,
           tenantId

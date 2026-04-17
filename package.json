@@ -23,13 +23,14 @@
     "typescript": "^6.0.3"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
+    "@google/genai": "^1.50.1",
     "@supabase/supabase-js": "^2.103.3",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "pino": "^10.3.1",
     "telnyx": "^6.41.0",
     "tweetnacl": "^1.0.3",
+    "wavefile": "^11.0.0",
     "ws": "^8.20.0",
     "zod": "^4.3.6"
   }
