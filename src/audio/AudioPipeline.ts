@@ -115,13 +115,13 @@ export class AudioPipeline {
       const s1 = filtered.readInt16LE((i + 1) * 2);
       const s2 = filtered.readInt16LE((i + 2) * 2);
       const avg = Math.max(-32768, Math.min(32767, Math.round((s0 + s1 + s2) / 3)));
-      downsampled.writeInt16LE(avg, outIdx);
+      downsampled.writeInt16BE(avg, outIdx);
       outIdx += 2;
     }
     const output = downsampled.subarray(0, outIdx);
 
-    // Step 4: Swap LE → BE (Telnyx L16 requires Big-Endian / network byte order)
-    output.swap16();
+    // Step 4: Output is already Big-Endian (Telnyx L16 requires BE)
+    // No swap needed as we used writeInt16BE above
 
     // Step 5: Push to jitter buffer for timed output
     const jb = this.jitterBuffers.get(sessionId);
@@ -187,7 +187,7 @@ export class AudioPipeline {
    * Removes low-frequency rumble and DC bias from audio signal
    *
    * y[n] = alpha × (y[n-1] + x[n] - x[n-1])
-   * where alpha ≈ 0.9691 for fc=80Hz at fs=16kHz
+   * where alpha ≈ 0.9391 for fc=80Hz at fs=8kHz (Telnyx input rate)
    */
   private removeDcOffset(buffer: Buffer, state: DcFilterState): void {
     const samples = buffer.length / 2;
