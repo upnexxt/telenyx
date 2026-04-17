@@ -147,12 +147,7 @@ router.post('/inbound', async (req, res) => {
     const host = req.headers.host;
     const websocketUrl = `${protocol}://${host}/media?sessionId=${sessionId}&tenantId=${tenantId}`;
 
-    logger.info({ 
-      correlationId, 
-      websocketUrl, 
-      host, 
-      xForwardedProto: req.headers['x-forwarded-proto'] 
-    }, 'Generated WebSocket URL for Telnyx');
+    logger.info(`Generated WebSocket URL for Telnyx: ${websocketUrl} (Host: ${host}, Proto: ${req.headers['x-forwarded-proto']})`);
 
     res.set('Content-Type', 'text/xml');
     res.send(`<?xml version="1.0" encoding="UTF-8"?>
