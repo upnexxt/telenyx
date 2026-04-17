@@ -51,7 +51,7 @@ export class AIService {
   }
 
   /**
-   * Start a Gemini Live session using the new @google/genai SDK (v1.50+ requires callbacks)
+   * Start a Gemini Live session using the new @google/genai SDK
    */
   public async startSession(sessionId: string, tenantId: string): Promise<void> {
     try {
@@ -60,24 +60,22 @@ export class AIService {
 
       logger.info({ sessionId, tenantId }, 'Connecting to Gemini Multimodal Live API');
 
-      // Initialize session object early for reference in callbacks
       let session: GeminiSession | null = null;
 
-      // Connect to Gemini Live API with required callbacks
+      // Connect to Gemini Live API
       const liveSession = await this.genAI.live.connect({
         model: 'models/gemini-live-2.5-flash-native-audio',
         config: {
-          generationConfig: {
-            responseModalities: ['audio'] as any,
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: tenantSettings.ai_voice ?? 'Aoede'
-                }
+          // ✅ FIX 1: Fields are now moved directly to config in latest SDK
+          responseModalities: ['audio'] as any,
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: tenantSettings.ai_voice ?? 'Aoede'
               }
-            },
-            temperature: tenantSettings.ai_temperature ?? 0.7,
+            }
           },
+          temperature: tenantSettings.ai_temperature ?? 0.7,
           systemInstruction: {
             parts: [{ text: systemInstruction }]
           },
@@ -113,7 +111,7 @@ export class AIService {
             this.sessions.delete(sessionId);
           }
         }
-      } as any); // Cast as any to ensure all required SDK fields are bypassed during build
+      } as any);
 
       session = {
         liveSession,
@@ -144,17 +142,19 @@ export class AIService {
     if (!session || !session.isSetup) return;
 
     try {
-      session.liveSession.send({
-        realtimeInput: {
-          mediaChunks: [{
-            mimeType: 'audio/pcm;rate=16000',
-            data: audioData.toString('base64')
-          }]
+      // ✅ FIX 2: Use sendRealtimeInput method with the 'audio' object
+      session.liveSession.sendRealtimeInput({
+        audio: {
+          mimeType: 'audio/pcm;rate=16000',
+          data: audioData.toString('base64')
         }
       });
       session.lastActivity = Date.now();
     } catch (error) {
-      logger.error({ sessionId, error: (error as Error).message }, 'Error sending audio to Gemini');
+      // Log only on first failure to prevent log spam in case of persistent error
+      if (Date.now() - session.lastActivity > 1000) {
+        logger.error({ sessionId, error: (error as Error).message }, 'Error sending audio to Gemini');
+      }
     }
   }
 
@@ -172,6 +172,7 @@ export class AIService {
           result = await this.handleBookAppointment(session.tenantId, call.args);
         }
 
+        // Send tool response via the SDK
         session.liveSession.send({
           toolResponse: {
             functionResponses: [{
