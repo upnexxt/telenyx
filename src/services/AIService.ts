@@ -250,7 +250,7 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
   ): Promise<void> {
     const setupMessage = {
       setup: {
-        model: 'models/gemini-2.4-flash-live',
+        model: 'models/gemini-2.0-flash-exp',
         generationConfig: {
           responseModalities: ['audio'],
           speechConfig: {
@@ -321,7 +321,7 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
       call_log_id: session.sessionId,
       tenant_id: session.tenantId,
       step_type: 'AI_METADATA',
-      content: { model: 'gemini-2.4-flash-live', event: 'setup_complete' },
+      content: { model: 'gemini-2.0-flash-exp', event: 'setup_complete' },
       created_at: new Date().toISOString()
     }).catch(err => {
       logger.error({ error: err.message }, 'Failed to log setup trace');

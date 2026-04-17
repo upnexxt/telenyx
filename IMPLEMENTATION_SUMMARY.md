@@ -30,7 +30,7 @@ Built a **production-grade AI receptionist gateway** integrating:
 **Key Features**:
 - ✅ Exponential backoff retry (5 retries, 500ms→1125ms delays)
 - ✅ Dynamic system instruction from tenant settings (ai_name, ai_voice, ai_language, custom_instructions)
-- ✅ Model: `gemini-2.4-flash-live` (Dutch voice: Aoede)
+- ✅ Model: `gemini-2.0-flash-exp` (Dutch voice: Aoede)
 - ✅ Real Supabase RPC calls (`get_available_slots`, `book_appointment_atomic`)
 - ✅ Tool calling framework (check_availability, book_appointment)
 - ✅ Call lifecycle tracking (INITIALIZING → CONNECTED → AI_SPEAKING → TERMINATING → TERMINATED)

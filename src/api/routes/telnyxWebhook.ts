@@ -150,9 +150,7 @@ router.post('/inbound', async (req, res) => {
     res.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Answer/>
-  <Connect>
-    <Stream bidirectionalCodec="L16" samplingRate="16000" url="${websocketUrl}"/>
-  </Connect>
+  <Stream url="${websocketUrl}"/>
 </Response>`);
 
   } catch (error) {
