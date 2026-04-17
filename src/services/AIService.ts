@@ -40,22 +40,18 @@ export class AIService {
     try {
       const buffer = Buffer.from(base64Pcm24k, 'base64');
       const wav = new WaveFile();
-      // Setup as 24kHz Mono 16-bit PCM
       wav.fromScratch(1, 24000, '16', buffer);
-      // Downsample to 16kHz
       wav.toSampleRate(16000);
-      
-      // Fix: wav.data.samples might be an object, cast appropriately
       const samples = (wav as any).data.samples;
       return Buffer.from(samples).toString('base64');
     } catch (error) {
       logger.error({ error: (error as Error).message }, 'Error downsampling audio');
-      return base64Pcm24k; // Fallback
+      return base64Pcm24k;
     }
   }
 
   /**
-   * Start a Gemini Live session using the new @google/genai SDK
+   * Start a Gemini Live session using the new @google/genai SDK (v1.50+ requires callbacks)
    */
   public async startSession(sessionId: string, tenantId: string): Promise<void> {
     try {
@@ -64,12 +60,15 @@ export class AIService {
 
       logger.info({ sessionId, tenantId }, 'Connecting to Gemini Multimodal Live API');
 
-      // Connect to Gemini Live API
+      // Initialize session object early for reference in callbacks
+      let session: GeminiSession | null = null;
+
+      // Connect to Gemini Live API with required callbacks
       const liveSession = await this.genAI.live.connect({
         model: 'models/gemini-live-2.5-flash-native-audio',
         config: {
           generationConfig: {
-            responseModalities: ['audio'] as any, 
+            responseModalities: ['audio'] as any,
             speechConfig: {
               voiceConfig: {
                 prebuiltVoiceConfig: {
@@ -83,26 +82,10 @@ export class AIService {
             parts: [{ text: systemInstruction }]
           },
           tools: this.getToolDeclarations() as any
-        }
-      });
-
-      const session: GeminiSession = {
-        liveSession,
-        sessionId,
-        tenantId,
-        isSetup: true,
-        lastActivity: Date.now()
-      };
-
-      this.sessions.set(sessionId, session);
-      this.callManager.updateSessionStatus(sessionId, CallStatus.CONNECTED);
-
-      // Handle messages FROM Gemini via Async Iterator
-      (async () => {
-        try {
-          // @ts-ignore - Stainless SDK uses async iterator
-          for await (const data of liveSession) {
-            session.lastActivity = Date.now();
+        },
+        callbacks: {
+          onMessage: async (data: any) => {
+            if (session) session.lastActivity = Date.now();
 
             // Handle Audio Content
             if (data.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data) {
@@ -119,16 +102,29 @@ export class AIService {
 
             // Handle Tool Calls
             if (data.toolCall) {
-              await this.handleToolCall(session, data.toolCall);
+              if (session) await this.handleToolCall(session, data.toolCall);
             }
+          },
+          onError: (error: Error) => {
+            logger.error({ sessionId, error: error.message }, 'Gemini Live Session Error');
+          },
+          onClose: () => {
+            logger.info({ sessionId }, 'Gemini Live Session Closed');
+            this.sessions.delete(sessionId);
           }
-        } catch (error) {
-          const err = error as Error;
-          logger.error({ sessionId, error: err.message }, 'Gemini Live Session closed with error');
-        } finally {
-          this.sessions.delete(sessionId);
         }
-      })();
+      } as any); // Cast as any to ensure all required SDK fields are bypassed during build
+
+      session = {
+        liveSession,
+        sessionId,
+        tenantId,
+        isSetup: true,
+        lastActivity: Date.now()
+      };
+
+      this.sessions.set(sessionId, session);
+      this.callManager.updateSessionStatus(sessionId, CallStatus.CONNECTED);
 
       logger.info({ sessionId }, 'Gemini Live session established');
 
