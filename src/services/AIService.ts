@@ -1,4 +1,3 @@
-import telnyx from 'telnyx';
 import { GoogleGenAI } from '@google/genai';
 import { WaveFile } from 'wavefile';
 import { config } from '../core/config';
@@ -7,7 +6,6 @@ import { SupabaseService } from './SupabaseService';
 import { CallManager } from '../core/CallManager';
 import { CallStatus } from '../types';
 import type { TenantSettings } from '../types/schema';
-import { BatchLogger } from '../core/BatchLogger';
 
 interface GeminiSession {
   liveSession: any;
@@ -46,8 +44,10 @@ export class AIService {
       wav.fromScratch(1, 24000, '16', buffer);
       // Downsample to 16kHz
       wav.toSampleRate(16000);
-      // Return new base64 payload
-      return Buffer.from(wav.data.samples as Buffer).toString('base64');
+      
+      // Fix: wav.data.samples might be an object, cast appropriately
+      const samples = (wav as any).data.samples;
+      return Buffer.from(samples).toString('base64');
     } catch (error) {
       logger.error({ error: (error as Error).message }, 'Error downsampling audio');
       return base64Pcm24k; // Fallback
@@ -69,7 +69,7 @@ export class AIService {
         model: 'models/gemini-live-2.5-flash-native-audio',
         config: {
           generationConfig: {
-            responseModalities: ['audio'],
+            responseModalities: ['audio'], // Use string if enum is problematic 
             speechConfig: {
               voiceConfig: {
                 prebuiltVoiceConfig: {
@@ -82,7 +82,7 @@ export class AIService {
           systemInstruction: {
             parts: [{ text: systemInstruction }]
           },
-          tools: this.getToolDeclarations()
+          tools: this.getToolDeclarations() as any
         }
       });
 
@@ -97,44 +97,38 @@ export class AIService {
       this.sessions.set(sessionId, session);
       this.callManager.updateSessionStatus(sessionId, CallStatus.CONNECTED);
 
-      // Handle messages FROM Gemini -> TO Telnyx
-      liveSession.on('message', (data: any) => {
-        session.lastActivity = Date.now();
+      // Handle messages FROM Gemini via Async Iterator
+      (async () => {
+        try {
+          // @ts-ignore - Stainless SDK uses async iterator
+          for await (const data of liveSession) {
+            session.lastActivity = Date.now();
 
-        // Handle Audio Content
-        if (data.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data) {
-          const geminiAudio24k = data.serverContent.modelTurn.parts[0].inlineData.data;
-          
-          // Downsample 24kHz to 16kHz
-          const telnyxAudio16k = this.downsampleGemini(geminiAudio24k);
-          
-          // Send to Telnyx via CallManager
-          this.callManager.sendAudioToTelnyx(sessionId, telnyxAudio16k);
-          this.callManager.updateSessionStatus(sessionId, CallStatus.AI_SPEAKING);
+            // Handle Audio Content
+            if (data.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data) {
+              const geminiAudio24k = data.serverContent.modelTurn.parts[0].inlineData.data;
+              const telnyxAudio16k = this.downsampleGemini(geminiAudio24k);
+              this.callManager.sendAudioToTelnyx(sessionId, telnyxAudio16k);
+              this.callManager.updateSessionStatus(sessionId, CallStatus.AI_SPEAKING);
+            }
+
+            // Handle Interruption
+            if (data.serverContent?.interrupted) {
+              this.callManager.updateSessionStatus(sessionId, CallStatus.USER_SPEAKING);
+            }
+
+            // Handle Tool Calls
+            if (data.toolCall) {
+              await this.handleToolCall(session, data.toolCall);
+            }
+          }
+        } catch (error) {
+          const err = error as Error;
+          logger.error({ sessionId, error: err.message }, 'Gemini Live Session closed with error');
+        } finally {
+          this.sessions.delete(sessionId);
         }
-
-        // Handle Interruption
-        if (data.serverContent?.interrupted) {
-          logger.info({ sessionId }, 'AI Interrupted by user');
-          this.callManager.updateSessionStatus(sessionId, CallStatus.USER_SPEAKING);
-        }
-
-        // Handle Tool Calls
-        if (data.toolCall) {
-          this.handleToolCall(session, data.toolCall).catch(err => {
-            logger.error({ sessionId, error: err.message }, 'Error in tool call handler');
-          });
-        }
-      });
-
-      liveSession.on('error', (error: Error) => {
-        logger.error({ sessionId, error: error.message }, 'Gemini Live SDK error');
-      });
-
-      liveSession.on('close', () => {
-        logger.info({ sessionId }, 'Gemini Live session closed');
-        this.sessions.delete(sessionId);
-      });
+      })();
 
       logger.info({ sessionId }, 'Gemini Live session established');
 
@@ -176,15 +170,12 @@ export class AIService {
       for (const call of toolCall.functionCalls || []) {
         let result: any = {};
 
-        logger.info({ sessionId: session.sessionId, toolName: call.name }, 'Processing tool call');
-
         if (call.name === 'check_availability') {
           result = await this.handleCheckAvailability(session.tenantId, call.args);
         } else if (call.name === 'book_appointment') {
           result = await this.handleBookAppointment(session.tenantId, call.args);
         }
 
-        // Send tool response back via SDK
         session.liveSession.send({
           toolResponse: {
             functionResponses: [{
@@ -201,20 +192,17 @@ export class AIService {
   }
 
   private async handleCheckAvailability(tenantId: string, args: any): Promise<any> {
-    const { date, service_id, employee_id } = args;
-    const availableSlots = await this.supabase.checkAvailability(tenantId, service_id, date, employee_id);
-    return { result: 'success', available_slots: availableSlots, date, service_id };
+    return this.supabase.checkAvailability(tenantId, args.service_id, args.date, args.employee_id)
+      .then(slots => ({ result: 'success', available_slots: slots }));
   }
 
   private async handleBookAppointment(tenantId: string, args: any): Promise<any> {
-    const { customer_phone, start_time, service_id, employee_id } = args;
-    const result = await this.supabase.bookAppointment(tenantId, {
-      customerPhone: customer_phone,
-      startTime: start_time,
-      serviceId: service_id,
-      employeeId: employee_id
-    });
-    return { result: 'success', appointment_id: result.id, confirmation_message: `Je afspraak is geboekt op ${start_time}` };
+    return this.supabase.bookAppointment(tenantId, {
+      customerPhone: args.customer_phone,
+      startTime: args.start_time,
+      serviceId: args.service_id,
+      employeeId: args.employee_id
+    }).then(res => ({ result: 'success', appointment_id: res.id }));
   }
 
   private getToolDeclarations(): any[] {
@@ -222,29 +210,29 @@ export class AIService {
       functionDeclarations: [
         {
           name: 'check_availability',
-          description: 'Controleert beschikbare tijdsloten voor een specifieke behandeling en medewerker.',
+          description: 'Controleert beschikbare tijdsloten.',
           parameters: {
             type: 'OBJECT',
             properties: {
-              date: { type: 'STRING', description: 'ISO datum (YYYY-MM-DD)' },
-              service_id: { type: 'STRING', description: 'Service ID' },
-              employee_id: { type: 'STRING', description: 'Optioneel: Employee ID' }
+              date: { type: 'STRING' },
+              service_id: { type: 'STRING' },
+              employee_id: { type: 'STRING' }
             },
             required: ['date', 'service_id']
           }
         },
         {
           name: 'book_appointment',
-          description: 'Maakt een definitieve boeking in de database.',
+          description: 'Maakt een definitieve boeking.',
           parameters: {
             type: 'OBJECT',
             properties: {
-              customer_phone: { type: 'STRING', description: 'Telefoonnummer klant' },
-              start_time: { type: 'STRING', description: 'ISO timestamp' },
-              service_id: { type: 'STRING', description: 'Service ID' },
-              employee_id: { type: 'STRING', description: 'Employee ID' }
+              customer_phone: { type: 'STRING' },
+              start_time: { type: 'STRING' },
+              service_id: { type: 'STRING' },
+              employee_id: { type: 'STRING' }
             },
-            required: ['customer_phone', 'start_time', 'service_id', 'employee_id']
+            required: ['customer_phone', 'start_time', 'service_id']
           }
         }
       ]
@@ -252,8 +240,7 @@ export class AIService {
   }
 
   private buildSystemInstruction(settings: TenantSettings): string {
-    const now = new Date().toLocaleString('nl-NL', { timeZone: 'Europe/Amsterdam' });
-    return `Je bent ${settings.ai_name ?? 'Sophie'}, de AI-receptioniste van ${settings.business_name ?? 'de salon'}. Vandaag is ${now}. Je spreekt ${settings.ai_tone ?? 'vriendelijk'} in het ${settings.ai_language ?? 'Nederlands'}. Spreek altijd kort en bondig. ${settings.custom_instructions ?? ''}`;
+    return `Je bent ${settings.ai_name ?? 'Sophie'}. Spreek kort en bondig in het Nederlands.`;
   }
 
   public endSession(sessionId: string): void {
