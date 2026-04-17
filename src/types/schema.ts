@@ -2948,13 +2948,14 @@ export type CompositeTypes<
  */
 export interface TenantSettings {
   tenant_id: string;
-  ai_name?: string;
-  ai_voice?: string;
-  ai_language?: string;
-  ai_tone?: string;
-  ai_temperature?: number;
-  business_name?: string;
-  custom_instructions?: string;
+  ai_name?: string | null;
+  ai_voice?: string | null;
+  ai_language?: string | null;
+  ai_tone?: string | null;
+  ai_temperature?: number | null;
+  business_name?: string | null;
+  custom_instructions?: string | null;
+  [key: string]: any; // Allow other Supabase fields
 }
 
 /**
@@ -2968,11 +2969,6 @@ export interface CallTrace {
   latency_ms?: number;
   created_at?: string;
 }
-
-/**
- * Tables type export for Supabase client
- */
-export type Tables = Database['public']['Tables'];
 
 export const Constants = {
   public: {

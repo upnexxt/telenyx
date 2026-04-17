@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
 import { CallSession, CallStatus, CallEventData } from '../types';
+import { logger } from './logger';
 
 export class CallManager extends EventEmitter {
   private static instance: CallManager;

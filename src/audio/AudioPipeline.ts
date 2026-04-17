@@ -6,7 +6,6 @@
 
 import { BufferPool } from './BufferPool';
 import { JitterBuffer } from './JitterBuffer';
-import { logger } from '../core/logger';
 
 export interface DcFilterState {
   prevIn: number;
@@ -24,7 +23,6 @@ export interface AudioDspState {
 
 export class AudioPipeline {
   private static instance: AudioPipeline;
-  private bufferPool: BufferPool;
   private jitterBuffers: Map<string, JitterBuffer> = new Map();
 
   // DC Offset Filter: first-order high-pass at 80Hz
@@ -44,7 +42,7 @@ export class AudioPipeline {
   private readonly ECHO_SUPPRESS_GAIN = 0.5;
 
   private constructor() {
-    this.bufferPool = new BufferPool(640, 50);
+    // Singleton constructor
   }
 
   public static getInstance(): AudioPipeline {

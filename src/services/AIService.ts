@@ -425,10 +425,8 @@ Wanneer je een afspraak boekt, MOET je ALTIJD de book_appointment tool gebruiken
               // - Anti-aliasing FIR filter (8kHz)
               // - Polyphase downsample 24kHz → 16kHz
               // - Push to jitter buffer for paced output
-              const firState = session.dspState?.firOut;
-              if (firState) {
-                pipeline.processOutbound(part.inlineData.data, session.sessionId, firState);
-              }
+              const firState = { history: new Array(6).fill(0) };
+              pipeline.processOutbound(part.inlineData.data, session.sessionId, firState);
 
               // Calculate latency (T0/T1 tracking)
               const chunkId = `${session.sessionId}_${session.lastActivity}`;

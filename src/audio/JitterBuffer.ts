@@ -12,8 +12,7 @@ export class JitterBuffer {
 
   // Constants
   private readonly DRAIN_INTERVAL_MS = 20; // 20ms clock tick
-  private readonly SAMPLES_PER_TICK = 320; // 320 samples @ 16kHz
-  private readonly BYTES_PER_TICK = 640; // 320 × 2 bytes (16-bit PCM)
+  private readonly BYTES_PER_TICK = 640; // 320 samples @ 16kHz × 2 bytes (16-bit PCM)
   private readonly CNG_AMPLITUDE = 33; // 10^(-60/20) × 32767 ≈ 33
 
   constructor(onDrain: (chunk: Buffer) => void) {
