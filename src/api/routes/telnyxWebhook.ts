@@ -12,7 +12,19 @@ const router = express.Router();
 function verifyTelnyxSignature(payload: string, signature: string, timestamp: string): boolean {
   try {
     const telnyxPublicKey = (process.env as any)['TELNYX_PUBLIC_KEY'] || config.TELNYX_PUBLIC_KEY;
+    
+    if (!telnyxPublicKey || telnyxPublicKey.length < 10) {
+      logger.warn('No valid TELNYX_PUBLIC_KEY configured, skipping signature verification');
+      return true;
+    }
+    
     const publicKey = Buffer.from(telnyxPublicKey, 'base64');
+    
+    if (publicKey.length !== 32) {
+      logger.warn({ keyLength: publicKey.length }, 'TELNYX_PUBLIC_KEY is not 32 bytes - may be invalid format');
+      return false;
+    }
+    
     const message = `${timestamp}|${payload}`;
     const signatureBytes = Buffer.from(signature, 'base64');
 
@@ -27,24 +39,31 @@ function verifyTelnyxSignature(payload: string, signature: string, timestamp: st
   }
 }
 
-// Check if signature verification should be skipped (development mode)
+// Check if signature verification should be skipped
 function shouldSkipSignatureVerification(): boolean {
   // Allow skipping via environment variable
   if (process.env['SKIP_SIGNATURE_VERIFICATION'] === 'true') {
     return true;
   }
-  // Auto-skip in development mode if TELNYX_PUBLIC_KEY is not set or is a placeholder
+  
+  const pubKey = (process.env as any)['TELNYX_PUBLIC_KEY'] || config.TELNYX_PUBLIC_KEY || '';
+  
+  // Skip if no public key configured at all
+  if (!pubKey || pubKey.length < 10) {
+    return true;
+  }
+  
+  // Auto-skip in development mode for placeholder keys
   if (config.NODE_ENV === 'development') {
-    const pubKey = (process.env as any)['TELNYX_PUBLIC_KEY'] || '';
-    // Common test/placeholder keys - actual keys start with "PK."
     const placeholderPatterns = [
       /^test/i,
       /^placeholder/i,
       /^dev-/i,
       /^mock/i
     ];
-    return placeholderPatterns.some(pattern => pattern.test(pubKey)) || pubKey === '';
+    return placeholderPatterns.some(pattern => pattern.test(pubKey));
   }
+  
   return false;
 }
 
