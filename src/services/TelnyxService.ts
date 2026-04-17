@@ -45,8 +45,8 @@ export class TelnyxService {
   public async startStream(callControlId: string, websocketUrl: string): Promise<boolean> {
     try {
       logger.info(`Starting bidirectional media stream (ID: ${callControlId}, URL: ${websocketUrl})`);
-      // Use .actions.streamingStart for Telnyx v6 SDK
-      await this.client.calls.actions.streamingStart(callControlId, {
+      // ✅ FIX: Changed from streamingStart to startStreaming
+      await this.client.calls.actions.startStreaming(callControlId, {
         stream_url: websocketUrl,
         stream_track: 'both_tracks'
       });
