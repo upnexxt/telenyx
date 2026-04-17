@@ -15,7 +15,25 @@ import { BatchLogger } from './core/BatchLogger';
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+// Create WebSocket server (not attached yet)
+const wss = new WebSocketServer({ noServer: true });
+
+// Explicitly handle HTTP Upgrade requests for WebSockets
+server.on('upgrade', (request, socket, head) => {
+  const { pathname } = new URL(request.url || '', `http://${request.headers.host}`);
+  
+  logger.info(`HTTP Upgrade request received for ${pathname} from ${socket.remoteAddress}`);
+
+  if (pathname === '/media') {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  } else {
+    logger.warn(`Rejecting WebSocket upgrade for unknown path: ${pathname}`);
+    socket.destroy();
+  }
+});
+
 
 const callManager = CallManager.getInstance();
 const eventLoopMonitor = EventLoopMonitor.getInstance(); // Initialize system health monitoring
