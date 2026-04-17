@@ -1,5 +1,4 @@
 import { GoogleGenAI } from '@google/genai';
-import { WaveFile } from 'wavefile';
 import { config } from '../core/config';
 import { logger } from '../core/logger';
 import { SupabaseService } from './SupabaseService';
@@ -70,14 +69,14 @@ export class AIService {
    * A-Law decode: 8-bit compressed to 16-bit PCM
    */
   private aLawDecode(byte: number): number {
-    const sign = (byte & 0x80) >> 7;
+    const sign = (byte & 0x80) ? -1 : 1;
     const exponent = (byte & 0x70) >> 4;
     const mantissa = byte & 0x0f;
 
-    let sample = mantissa << (exponent + 3);
-    if (exponent === 0) sample = mantissa << 4;
+    let sample = (mantissa + 16) << (exponent + 3);
+    if (exponent === 0) sample = (mantissa + 16) << 4;
 
-    return sign === 0 ? sample : -sample;
+    return sample * sign;
   }
 
   /**
