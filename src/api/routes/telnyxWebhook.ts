@@ -10,7 +10,7 @@ const router = express.Router();
 
 // Function to verify Telnyx webhook signature
 // Temporarily disabled for debugging - always return true
-function verifyTelnyxSignature(payload: string, signature: string, timestamp: string): boolean {
+function verifyTelnyxSignature(_payload: string, _signature: string, _timestamp: string): boolean {
   logger.warn('Telnyx signature verification disabled for debugging');
   return true;
 }
