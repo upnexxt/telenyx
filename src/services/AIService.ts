@@ -40,21 +40,26 @@ export class AIService {
    */
   private transcodeTelnyxToGemini(base64Payload: string): string {
     try {
-      const wav = new WaveFile();
-      // Setup as 8kHz Mono A-Law
-      wav.fromScratch(1, 8000, '8a', Buffer.from(base64Payload, 'base64'));
-      // Decode A-Law to Linear PCM
-      wav.fromALaw();
-      // Resample to 16kHz for Gemini
-      wav.toSampleRate(16000);
+      const aLawData = Buffer.from(base64Payload, 'base64');
 
-      const samples = (wav as any).data.samples;
-      // Ensure samples is a Buffer, not a Uint8Array
-      const sampleBuffer = Buffer.isBuffer(samples)
-        ? samples
-        : Buffer.from(samples);
+      // Decode A-Law to 16-bit PCM
+      const pcm16k = Buffer.allocUnsafe(aLawData.length * 4); // 8kHz to 16kHz = 2x samples, 8-bit to 16-bit = 2x bytes
+      let outIdx = 0;
 
-      return sampleBuffer.toString('base64');
+      for (let i = 0; i < aLawData.length; i++) {
+        const aLawByte = aLawData[i];
+        const pcmSample = this.aLawDecode(aLawByte);
+
+        // Write original sample at output rate
+        pcm16k.writeInt16LE(pcmSample, outIdx);
+        outIdx += 2;
+
+        // Write interpolated sample for 2x upsampling
+        pcm16k.writeInt16LE(pcmSample, outIdx);
+        outIdx += 2;
+      }
+
+      return pcm16k.toString('base64');
     } catch (error) {
       logger.error({ error: (error as Error).message }, 'Error transcoding Telnyx -> Gemini');
       return base64Payload;
@@ -62,28 +67,68 @@ export class AIService {
   }
 
   /**
+   * A-Law decode: 8-bit compressed to 16-bit PCM
+   */
+  private aLawDecode(byte: number): number {
+    const sign = (byte & 0x80) >> 7;
+    const exponent = (byte & 0x70) >> 4;
+    const mantissa = byte & 0x0f;
+
+    let sample = mantissa << (exponent + 3);
+    if (exponent === 0) sample = mantissa << 4;
+
+    return sign === 0 ? sample : -sample;
+  }
+
+  /**
    * Transcodes 24kHz PCM (Gemini) to 8kHz A-Law (Telnyx/PCMA)
    */
   private transcodeGeminiToTelnyx(base64Payload: string): string {
     try {
-      const wav = new WaveFile();
-      // Setup as 24kHz Mono 16-bit PCM
-      wav.fromScratch(1, 24000, '16', Buffer.from(base64Payload, 'base64'));
-      // Downsample to 8kHz for phone line
-      wav.toSampleRate(8000);
-      // Encode to A-Law
-      wav.toALaw();
+      const pcm24k = Buffer.from(base64Payload, 'base64');
+      const samplesCount = pcm24k.length / 2; // 16-bit = 2 bytes per sample
 
-      const samples = (wav as any).data.samples;
-      // Ensure samples is a Buffer, not a Uint8Array
-      const sampleBuffer = Buffer.isBuffer(samples)
-        ? samples
-        : Buffer.from(samples);
+      // Downsample 24kHz to 8kHz (keep every 3rd sample) and encode to A-Law
+      const aLawData = Buffer.allocUnsafe(Math.floor(samplesCount / 3));
+      let outIdx = 0;
 
-      return sampleBuffer.toString('base64');
+      for (let i = 0; i < samplesCount - 2; i += 3) {
+        const pcmSample = pcm24k.readInt16LE(i * 2);
+        const aLawByte = this.pcmToALaw(pcmSample);
+        aLawData.writeUInt8(aLawByte, outIdx);
+        outIdx++;
+      }
+
+      return aLawData.subarray(0, outIdx).toString('base64');
     } catch (error) {
       logger.error({ error: (error as Error).message }, 'Error transcoding Gemini -> Telnyx');
       return base64Payload;
+    }
+  }
+
+  /**
+   * PCM to A-Law encode: 16-bit PCM to 8-bit compressed
+   */
+  private pcmToALaw(sample: number): number {
+    const sign = sample < 0 ? 0x80 : 0x00;
+    const absSample = Math.abs(sample);
+
+    if (absSample < 256) {
+      return sign | ((absSample >> 4) & 0x0f);
+    } else if (absSample < 512) {
+      return sign | 0x10 | ((absSample >> 5) & 0x0f);
+    } else if (absSample < 1024) {
+      return sign | 0x20 | ((absSample >> 6) & 0x0f);
+    } else if (absSample < 2048) {
+      return sign | 0x30 | ((absSample >> 7) & 0x0f);
+    } else if (absSample < 4096) {
+      return sign | 0x40 | ((absSample >> 8) & 0x0f);
+    } else if (absSample < 8192) {
+      return sign | 0x50 | ((absSample >> 9) & 0x0f);
+    } else if (absSample < 16384) {
+      return sign | 0x60 | ((absSample >> 10) & 0x0f);
+    } else {
+      return sign | 0x70 | ((absSample >> 11) & 0x0f);
     }
   }
 
