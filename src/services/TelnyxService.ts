@@ -27,7 +27,8 @@ export class TelnyxService {
   public async answerCall(callControlId: string): Promise<boolean> {
     try {
       logger.info(`Answering Telnyx call (ID: ${callControlId})`);
-      await this.client.calls.answer(callControlId);
+      // Use .actions namespace for Telnyx v6 SDK
+      await this.client.calls.actions.answer(callControlId);
       return true;
     } catch (error) {
       const err = error as any;
@@ -44,7 +45,8 @@ export class TelnyxService {
   public async startStream(callControlId: string, websocketUrl: string): Promise<boolean> {
     try {
       logger.info(`Starting bidirectional media stream (ID: ${callControlId}, URL: ${websocketUrl})`);
-      await this.client.calls.streamStart(callControlId, {
+      // Use .actions.streamingStart for Telnyx v6 SDK
+      await this.client.calls.actions.streamingStart(callControlId, {
         stream_url: websocketUrl,
         stream_track: 'both_tracks'
       });
@@ -64,11 +66,14 @@ export class TelnyxService {
   public async hangupCall(callControlId: string): Promise<boolean> {
     try {
       logger.info({ callControlId }, 'Hanging up Telnyx call');
-      await this.client.calls.hangup(callControlId);
+      // Use .actions namespace for Telnyx v6 SDK
+      await this.client.calls.actions.hangup(callControlId);
       return true;
     } catch (error) {
-      const err = error as Error;
-      logger.error({ callControlId, error: err.message }, 'Failed to hangup Telnyx call');
+      const err = error as any;
+      const message = err.message || 'Unknown error';
+      const detail = err.raw?.message || err.detail || '';
+      logger.error(`Failed to hangup Telnyx call: ${message} ${detail}`);
       return false;
     }
   }
