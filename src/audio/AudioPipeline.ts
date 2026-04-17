@@ -28,12 +28,6 @@ export class AudioPipeline {
   // alpha = exp(-2π × fc / fs) where fc=80Hz, fs=8000Hz ≈ 0.9391 (input is 8kHz from Telnyx)
   private readonly ALPHA_DC = 0.9391;
 
-  // FIR Coefficients: 7-tap low-pass filter at 8kHz (for 24kHz input)
-  // Parks-McClellan design with Hann window
-  private readonly FIR_COEFFS = [
-    -0.0078125, 0.046875, 0.289063, 0.4375, 0.289063, 0.046875, -0.0078125
-  ];
-
   // Soft limiter gain: -3dB = 10^(-3/20) ≈ 0.7079
   private readonly SOFT_LIMIT_GAIN = 0.7079;
 
@@ -240,45 +234,6 @@ export class AudioPipeline {
     return output;
   }
 
-  /**
-   * Anti-Aliasing FIR Filter: 7-tap low-pass at 8kHz
-   * Parks-McClellan design with Hann window, normalized
-   * Prevents aliasing artifacts when downsampling from 24kHz to 16kHz
-   *
-   * Filter has zero-phase (symmetric), group delay = 3 samples ≈ 0.125ms @ 24kHz
-   */
-  private applyFirFilter(input: Buffer, state: FirFilterState): Buffer {
-    const inputSamples = input.length / 2;
-    const output = Buffer.allocUnsafe(input.length);
-
-    for (let i = 0; i < inputSamples; i++) {
-      let acc = 0;
-
-      for (let k = 0; k < this.FIR_COEFFS.length; k++) {
-        const sampleIndex = i - k + 3; // FIR_DELAY = 3
-
-        let sample = 0;
-        if (sampleIndex >= 0 && sampleIndex < inputSamples) {
-          sample = input.readInt16LE(sampleIndex * 2);
-        } else if (sampleIndex < 0 && state.history[6 + sampleIndex]) {
-          sample = state.history[6 + sampleIndex]!;
-        }
-
-        acc += this.FIR_COEFFS[k]! * sample;
-      }
-
-      const clamped = Math.max(-32768, Math.min(32767, Math.round(acc)));
-      output.writeInt16LE(clamped, i * 2);
-    }
-
-    // Update history for next chunk (last 6 samples)
-    state.history = [];
-    for (let k = Math.max(0, inputSamples - 6); k < inputSamples; k++) {
-      state.history.push(input.readInt16LE(k * 2));
-    }
-
-    return output;
-  }
-
 }
+
 
