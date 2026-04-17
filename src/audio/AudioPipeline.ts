@@ -89,45 +89,55 @@ export class AudioPipeline {
 
   /**
    * Outbound audio processing: Gemini → Telnyx
-   * Steps: soft limiter, anti-aliasing FIR, downsample 24kHz→8kHz, swap LE→BE
+   * Steps: soft limiter, downsample 24kHz→8kHz, encode to A-Law (PCMA)
    * Output goes to JitterBuffer for paced Telnyx delivery
    */
   public processOutbound(
     base64Audio: string,
     sessionId: string,
-    firState: FirFilterState
+    _firState: FirFilterState
   ): void {
     const rawAudio = Buffer.from(base64Audio, 'base64');
 
-    // Step 1: Soft limiter (-3dB gain) to prevent clipping on phone lines
+    // Step 1: Soft limiter (-3dB gain) to prevent clipping
     const limited = this.applySoftLimiter(rawAudio);
 
-    // Step 2: Anti-aliasing FIR filter (low-pass for 24kHz input)
-    const filtered = this.applyFirFilter(limited, firState);
-
-    // Step 3: Downsample 24kHz → 8kHz (average every 3 samples)
-    const inputSamples = filtered.length / 2;
+    // Step 2: Downsample 24kHz → 8kHz (average triplets) and encode to A-Law
+    const inputSamples = limited.length / 2;
     const outputSamples = Math.floor(inputSamples / 3);
-    const downsampled = Buffer.allocUnsafe(outputSamples * 2);
+    const output = Buffer.allocUnsafe(outputSamples); // 1 byte per A-Law sample
+
     let outIdx = 0;
     for (let i = 0; i < inputSamples - 2; i += 3) {
-      const s0 = filtered.readInt16LE(i * 2);
-      const s1 = filtered.readInt16LE((i + 1) * 2);
-      const s2 = filtered.readInt16LE((i + 2) * 2);
-      const avg = Math.max(-32768, Math.min(32767, Math.round((s0 + s1 + s2) / 3)));
-      downsampled.writeInt16BE(avg, outIdx);
-      outIdx += 2;
+      const s0 = limited.readInt16LE(i * 2);
+      const s1 = limited.readInt16LE((i + 1) * 2);
+      const s2 = limited.readInt16LE((i + 2) * 2);
+      const avg = Math.round((s0 + s1 + s2) / 3);
+      output.writeUInt8(this.pcmToALaw(avg), outIdx);
+      outIdx++;
     }
-    const output = downsampled.subarray(0, outIdx);
 
-    // Step 4: Output is already Big-Endian (Telnyx L16 requires BE)
-    // No swap needed as we used writeInt16BE above
-
-    // Step 5: Push to jitter buffer for timed output
+    // Step 3: Push to jitter buffer for timed output
     const jb = this.jitterBuffers.get(sessionId);
     if (jb) {
-      jb.push(output);
+      jb.push(output.subarray(0, outIdx));
     }
+  }
+
+  private pcmToALaw(sample: number): number {
+    const QUANT_MASK = 0xf;
+    const SEG_SHIFT = 4;
+    const sign = (sample >> 8) & 0x80;
+
+    if (sign !== 0) sample = -sample;
+    if (sample > 32635) sample = 32635;
+
+    let exponent = 7;
+    for (let i = 0; i < 8; i++) {
+      if (sample <= (0xff << i)) { exponent = 7 - i; break; }
+    }
+    const mantissa = (sample >> (exponent + 3)) & QUANT_MASK;
+    return ((sign | (exponent << SEG_SHIFT) | mantissa) ^ 0x55) & 0xff;
   }
 
   /**
