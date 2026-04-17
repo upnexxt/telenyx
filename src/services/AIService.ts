@@ -69,7 +69,7 @@ export class AIService {
         model: 'models/gemini-live-2.5-flash-native-audio',
         config: {
           generationConfig: {
-            responseModalities: ['audio'], // Use string if enum is problematic 
+            responseModalities: ['audio'] as any, 
             speechConfig: {
               voiceConfig: {
                 prebuiltVoiceConfig: {
