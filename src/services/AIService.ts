@@ -46,7 +46,7 @@ export class AIService {
       let outIdx = 0;
 
       for (let i = 0; i < aLawData.length; i++) {
-        const aLawByte = aLawData[i];
+        const aLawByte = aLawData.readUInt8(i);
         const pcmSample = this.aLawDecode(aLawByte);
 
         // Write original sample at output rate
