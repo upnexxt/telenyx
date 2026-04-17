@@ -12,7 +12,7 @@ export class JitterBuffer {
 
   // Constants
   private readonly DRAIN_INTERVAL_MS = 20; // 20ms clock tick
-  private readonly BYTES_PER_TICK = 160; // 160 samples @ 8kHz × 1 byte (8kHz A-Law/PCMA for Telnyx)
+  private readonly BYTES_PER_TICK = 320; // 160 samples @ 8kHz × 2 bytes (8kHz L16 for Telnyx)
   private readonly CNG_AMPLITUDE = 33; // 10^(-60/20) × 32767 ≈ 33
 
   constructor(onDrain: (chunk: Buffer) => void) {
@@ -86,10 +86,10 @@ export class JitterBuffer {
    */
   private generateCng(): Buffer {
     const buf = Buffer.allocUnsafe(this.BYTES_PER_TICK);
-    for (let i = 0; i < this.BYTES_PER_TICK; i++) {
-      // White noise: random 8-bit A-Law value at -60dBFS
-      const noise = Math.round((Math.random() * 2 - 1) * this.CNG_AMPLITUDE) & 0xFF;
-      buf.writeUInt8(noise, i);
+    for (let i = 0; i < this.BYTES_PER_TICK; i += 2) {
+      // White noise: 16-bit Big-Endian (Telnyx L16) at -60dBFS
+      const noise = Math.round((Math.random() * 2 - 1) * this.CNG_AMPLITUDE);
+      buf.writeInt16BE(noise, i);
     }
     return buf;
   }

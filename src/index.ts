@@ -122,10 +122,16 @@ wss.on('connection', (ws, req) => {
 
       if (message.event === 'media') {
         const audioPayload = message.media.payload;
+        const pipeline = AudioPipeline.getInstance();
         const aiService = AIService.getInstance();
-        
-        // Pass to AIService which handles transcoding (8kHz PCMA -> 16kHz PCM)
-        aiService.sendAudio(sessionId, audioPayload);
+
+        // Process inbound: swap BE→LE, DC filter, echo suppress, upsample 8kHz→16kHz
+        const processedBuffer = pipeline.processInbound(
+          audioPayload,
+          session.dspState!.dcIn,
+          session.status === CallStatus.AI_SPEAKING
+        );
+        aiService.sendAudio(sessionId, processedBuffer);
 
       } else if (message.event === 'start' || message.event === 'connected') {
         const streamId = message.stream_id || (message.start ? message.start.stream_id : null);
@@ -222,11 +228,26 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  ws.on('close', () => {
-    logCallEvent('info', 'WebSocket connection closed', {
-      sessionId,
-      tenantId
-    });
+  ws.on('close', async () => {
+    logCallEvent('info', 'WebSocket connection closed', { sessionId, tenantId });
+
+    const s = callManager.getSession(sessionId);
+    if (s && s.status !== CallStatus.TERMINATED) {
+      callManager.updateSessionStatus(sessionId, CallStatus.TERMINATING);
+      AudioPipeline.getInstance().destroyJitterBuffer(sessionId);
+      AIService.getInstance().endSession(sessionId);
+
+      const supabase = SupabaseService.getInstance();
+      const startTime = s.metadata['startTime'] as Date | undefined;
+      if (startTime) {
+        const secs = Math.floor((Date.now() - startTime.getTime()) / 1000);
+        await supabase.finalizeCallLog(sessionId, secs).catch(() => {});
+        await supabase.updateTenantBilling(tenantId, Math.ceil(secs / 60)).catch(() => {});
+      }
+
+      callManager.updateSessionStatus(sessionId, CallStatus.TERMINATED);
+      callManager.destroySession(sessionId);
+    }
   });
 
   ws.on('error', (error) => {

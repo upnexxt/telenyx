@@ -35,113 +35,6 @@ export class AIService {
   }
 
   /**
-   * Transcodes 8kHz A-Law (Telnyx/PCMA) to 16kHz PCM (Gemini)
-   */
-  private transcodeTelnyxToGemini(base64Payload: string): string {
-    try {
-      const aLawData = Buffer.from(base64Payload, 'base64');
-
-      // Decode A-Law to 16-bit PCM
-      const pcm16k = Buffer.allocUnsafe(aLawData.length * 4); // 8kHz to 16kHz = 2x samples, 8-bit to 16-bit = 2x bytes
-      let outIdx = 0;
-
-      for (let i = 0; i < aLawData.length; i++) {
-        const aLawByte = aLawData.readUInt8(i);
-        const pcmSample = this.aLawDecode(aLawByte);
-
-        // Write original sample at output rate
-        pcm16k.writeInt16LE(pcmSample, outIdx);
-        outIdx += 2;
-
-        // Write interpolated sample for 2x upsampling
-        pcm16k.writeInt16LE(pcmSample, outIdx);
-        outIdx += 2;
-      }
-
-      return pcm16k.toString('base64');
-    } catch (error) {
-      logger.error({ error: (error as Error).message }, 'Error transcoding Telnyx -> Gemini');
-      return base64Payload;
-    }
-  }
-
-  /**
-   * A-Law decode: 8-bit compressed to 16-bit PCM (ITU-T G.711)
-   */
-  private aLawDecode(byte: number): number {
-    // Apply bit inversion first (XOR 0x55)
-    byte ^= 0x55;
-
-    // Extract sign (bit 7) and components
-    const sign = (byte & 0x80) ? -1 : 1;
-    const exponent = (byte >> 4) & 0x07; // 3 bits
-    const mantissa = byte & 0x0f; // 4 bits
-
-    // Reconstruct PCM value according to ITU-T G.711 standard
-    let pcm: number;
-    if (exponent === 0) {
-      // Linear segment
-      pcm = (mantissa << 4) + 8;
-    } else {
-      // Compressed segments - add implicit leading 1 bit to mantissa
-      pcm = ((mantissa | 0x10) << (exponent + 3)) - 128;
-    }
-
-    return sign * pcm;
-  }
-
-  /**
-   * Transcodes 24kHz PCM (Gemini) to 8kHz A-Law (Telnyx/PCMA)
-   */
-  private transcodeGeminiToTelnyx(base64Payload: string): string {
-    try {
-      const pcm24k = Buffer.from(base64Payload, 'base64');
-      const samplesCount = pcm24k.length / 2; // 16-bit = 2 bytes per sample
-
-      // Downsample 24kHz to 8kHz (keep every 3rd sample) and encode to A-Law
-      const aLawData = Buffer.allocUnsafe(Math.floor(samplesCount / 3));
-      let outIdx = 0;
-
-      for (let i = 0; i < samplesCount - 2; i += 3) {
-        const pcmSample = pcm24k.readInt16LE(i * 2);
-        const aLawByte = this.pcmToALaw(pcmSample);
-        aLawData.writeUInt8(aLawByte, outIdx);
-        outIdx++;
-      }
-
-      return aLawData.subarray(0, outIdx).toString('base64');
-    } catch (error) {
-      logger.error({ error: (error as Error).message }, 'Error transcoding Gemini -> Telnyx');
-      return base64Payload;
-    }
-  }
-
-  /**
-   * PCM to A-Law encode: 16-bit PCM to 8-bit compressed (ITU-T G.711)
-   */
-  private pcmToALaw(sample: number): number {
-    const QUANT_MASK = 0xf;
-    const SEG_SHIFT = 4;
-    const sign = (sample >> 8) & 0x80;
-
-    if (sign !== 0) sample = -sample;
-    if (sample > 32635) sample = 32635;
-
-    let exponent = 7;
-    let mantissa = 0;
-
-    for (let i = 0; i < 8; i++) {
-      if (sample <= (0xff << i)) {
-        exponent = 7 - i;
-        break;
-      }
-    }
-
-    mantissa = (sample >> (exponent + 3)) & QUANT_MASK;
-    return ((sign | (exponent << SEG_SHIFT) | mantissa) ^ 0x55) & 0xff;
-  }
-
-  /**
    * Start a Gemini Live session using the new @google/genai SDK
    */
   public async startSession(sessionId: string, tenantId: string): Promise<void> {
@@ -185,24 +78,11 @@ export class AIService {
             if (data.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data) {
               const geminiAudio24k = data.serverContent.modelTurn.parts[0].inlineData.data;
 
-              // Transcode 24kHz PCM -> 8kHz PCMA
-              const inputSize = Buffer.byteLength(geminiAudio24k, 'base64');
-              const telnyxAudioAuto = this.transcodeGeminiToTelnyx(geminiAudio24k);
-              const outputSize = Buffer.byteLength(telnyxAudioAuto, 'base64');
-
-              logger.debug({ sessionId, inputSize, outputSize, ratio: (outputSize / inputSize).toFixed(2) },
-                'Audio transcoded Gemini->Telnyx');
-
-              // Route through jitter buffer for paced delivery
+              // Route through AudioPipeline: soft limit, FIR, downsample 24kHz→8kHz, swap LE→BE
               const pipeline = AudioPipeline.getInstance();
-              const jitterBuffer = (pipeline as any).jitterBuffers?.get(sessionId);
-              if (jitterBuffer) {
-                // Decode base64 and push to jitter buffer
-                const audioBuffer = Buffer.from(telnyxAudioAuto, 'base64');
-                jitterBuffer.push(audioBuffer);
-              } else {
-                // Fallback: send directly if jitter buffer not available
-                this.callManager.sendAudioToTelnyx(sessionId, telnyxAudioAuto);
+              const sessionData = this.callManager.getSession(sessionId);
+              if (sessionData?.dspState) {
+                pipeline.processOutbound(geminiAudio24k, sessionId, sessionData.dspState.firOut);
               }
 
               if (session) {
@@ -258,24 +138,17 @@ export class AIService {
 
   /**
    * Send audio FROM Telnyx -> TO Gemini
+   * Expects a Buffer already processed by AudioPipeline.processInbound (16kHz LE PCM)
    */
-  public sendAudio(sessionId: string, base64Audio: string): void {
+  public sendAudio(sessionId: string, processedBuffer: Buffer): void {
     const session = this.sessions.get(sessionId);
     if (!session || !session.isSetup) return;
 
     try {
-      // Transcode 8kHz PCMA -> 16kHz PCM
-      const inputSize = Buffer.byteLength(base64Audio, 'base64');
-      const geminiAudio = this.transcodeTelnyxToGemini(base64Audio);
-      const outputSize = Buffer.byteLength(geminiAudio, 'base64');
-
-      logger.debug({ sessionId, inputSize, outputSize, ratio: (outputSize / inputSize).toFixed(2) },
-        'Audio transcoded Telnyx->Gemini');
-
       session.liveSession.sendRealtimeInput({
         audio: {
           mimeType: 'audio/pcm;rate=16000',
-          data: geminiAudio
+          data: processedBuffer.toString('base64')
         }
       });
       session.lastActivity = Date.now();

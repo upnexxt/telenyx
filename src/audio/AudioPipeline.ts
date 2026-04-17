@@ -25,8 +25,8 @@ export class AudioPipeline {
   private jitterBuffers: Map<string, JitterBuffer> = new Map();
 
   // DC Offset Filter: first-order high-pass at 80Hz
-  // alpha = exp(-2π × fc / fs) where fc=80Hz, fs=16000Hz ≈ 0.9691
-  private readonly ALPHA_DC = 0.9691;
+  // alpha = exp(-2π × fc / fs) where fc=80Hz, fs=8000Hz ≈ 0.9391 (input is 8kHz from Telnyx)
+  private readonly ALPHA_DC = 0.9391;
 
   // FIR Coefficients: 7-tap low-pass filter at 8kHz (for 24kHz input)
   // Parks-McClellan design with Hann window
@@ -53,7 +53,7 @@ export class AudioPipeline {
 
   /**
    * Inbound audio processing: Telnyx → Gemini
-   * Steps: swap16 (BE→LE), DC offset removal, echo suppression
+   * Steps: swap16 (BE→LE), DC offset removal, echo suppression, upsample 8kHz→16kHz
    */
   public processInbound(
     base64Audio: string,
@@ -66,22 +66,30 @@ export class AudioPipeline {
     // Telnyx sends L16 in network byte order (BE), Gemini expects LE
     buffer.swap16();
 
-    // Step 2: DC offset removal (high-pass filter at 80Hz)
-    // Removes telephone line "hum" and DC bias
+    // Step 2: DC offset removal (high-pass filter at 80Hz @ 8kHz input)
     this.removeDcOffset(buffer, dcState);
 
     // Step 3: Echo suppression
-    // If AI is speaking, attenuate inbound audio by 6dB to prevent feedback loops
     if (isAiSpeaking) {
       this.applyEchoSuppression(buffer);
     }
 
-    return buffer;
+    // Step 4: Upsample 8kHz → 16kHz via linear interpolation (Gemini requires 16kHz)
+    const inputSamples = buffer.length / 2;
+    const output = Buffer.allocUnsafe(inputSamples * 4);
+    for (let i = 0; i < inputSamples; i++) {
+      const s0 = buffer.readInt16LE(i * 2);
+      const s1 = i + 1 < inputSamples ? buffer.readInt16LE((i + 1) * 2) : s0;
+      output.writeInt16LE(s0, i * 4);
+      output.writeInt16LE(Math.round((s0 + s1) / 2), i * 4 + 2);
+    }
+
+    return output;
   }
 
   /**
    * Outbound audio processing: Gemini → Telnyx
-   * Steps: soft limiter, anti-aliasing FIR, polyphase downsample 24→16kHz
+   * Steps: soft limiter, anti-aliasing FIR, downsample 24kHz→8kHz, swap LE→BE
    * Output goes to JitterBuffer for paced Telnyx delivery
    */
   public processOutbound(
@@ -94,16 +102,31 @@ export class AudioPipeline {
     // Step 1: Soft limiter (-3dB gain) to prevent clipping on phone lines
     const limited = this.applySoftLimiter(rawAudio);
 
-    // Step 2: Anti-aliasing FIR filter (low-pass at 8kHz for 24kHz input)
+    // Step 2: Anti-aliasing FIR filter (low-pass for 24kHz input)
     const filtered = this.applyFirFilter(limited, firState);
 
-    // Step 3: Polyphase downsample 24kHz → 16kHz (3:2 ratio)
-    const downsampled = this.downsample24to16(filtered);
+    // Step 3: Downsample 24kHz → 8kHz (average every 3 samples)
+    const inputSamples = filtered.length / 2;
+    const outputSamples = Math.floor(inputSamples / 3);
+    const downsampled = Buffer.allocUnsafe(outputSamples * 2);
+    let outIdx = 0;
+    for (let i = 0; i < inputSamples - 2; i += 3) {
+      const s0 = filtered.readInt16LE(i * 2);
+      const s1 = filtered.readInt16LE((i + 1) * 2);
+      const s2 = filtered.readInt16LE((i + 2) * 2);
+      const avg = Math.max(-32768, Math.min(32767, Math.round((s0 + s1 + s2) / 3)));
+      downsampled.writeInt16LE(avg, outIdx);
+      outIdx += 2;
+    }
+    const output = downsampled.subarray(0, outIdx);
 
-    // Step 4: Push to jitter buffer for timed output
+    // Step 4: Swap LE → BE (Telnyx L16 requires Big-Endian / network byte order)
+    output.swap16();
+
+    // Step 5: Push to jitter buffer for timed output
     const jb = this.jitterBuffers.get(sessionId);
     if (jb) {
-      jb.push(downsampled);
+      jb.push(output);
     }
   }
 
@@ -247,42 +270,5 @@ export class AudioPipeline {
     return output;
   }
 
-  /**
-   * Polyphase Downsample 24kHz → 16kHz (3:2 ratio)
-   * For every 3 input samples → 2 output samples
-   *
-   * Approach: Keep sample 0, linearly interpolate between samples 1 & 2
-   * This is a simplified polyphase filter suitable for real-time
-   */
-  private downsample24to16(input: Buffer): Buffer {
-    const inputSamples = input.length / 2;
-    const outputSamples = Math.floor(inputSamples * 2 / 3);
-    const output = Buffer.allocUnsafe(outputSamples * 2);
-
-    let outIdx = 0;
-    for (let i = 0; i < inputSamples - 2; i += 3) {
-      const s0 = input.readInt16LE(i * 2);
-      const s1 = input.readInt16LE((i + 1) * 2);
-      const s2 = input.readInt16LE((i + 2) * 2);
-
-      // Output sample 0: direct from input[i]
-      output.writeInt16LE(s0, outIdx);
-
-      // Output sample 1: linear interpolation of input[i+1] and input[i+2]
-      const interpolated = Math.round((s1 + s2) / 2);
-      const clamped = Math.max(-32768, Math.min(32767, interpolated));
-      output.writeInt16LE(clamped, outIdx + 2);
-
-      outIdx += 4;
-    }
-
-    // Handle remainder (less than 3 samples)
-    // For simplicity, just pass through
-    if ((inputSamples % 3) === 1) {
-      const lastSample = input.readInt16LE((inputSamples - 1) * 2);
-      output.writeInt16LE(lastSample, outIdx);
-    }
-
-    return output.subarray(0, outIdx);
-  }
 }
+
