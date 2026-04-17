@@ -2,7 +2,9 @@ import express from 'express';
 import { config } from '../../core/config';
 import { logger, logCallEvent } from '../../core/logger';
 import { SupabaseService } from '../../services/SupabaseService';
+import { TelnyxService } from '../../services/TelnyxService';
 import { CallManager } from '../../core/CallManager';
+
 import { randomUUID } from 'crypto';
 
 const router = express.Router();
@@ -140,21 +142,32 @@ router.post('/inbound', async (req, res) => {
       callControlId
     });
 
-    // Generate TeXML response - always use wss for secure WebSocket (required for tunnels)
+    // Generate WebSocket URL
     const protocol = req.headers['x-forwarded-proto'] === 'https' || 
                      req.headers.host?.includes('.trycloudflare.com') ||
-                     req.headers.host?.includes('.ngrok') ? 'wss' : 'ws';
+                     req.headers.host?.includes('.ngrok') ||
+                     req.headers.host?.includes('.up.railway.app') ? 'wss' : 'ws';
     const host = req.headers.host;
     const websocketUrl = `${protocol}://${host}/media?sessionId=${sessionId}&tenantId=${tenantId}`;
 
     logger.info(`Generated WebSocket URL for Telnyx: ${websocketUrl} (Host: ${host}, Proto: ${req.headers['x-forwarded-proto']})`);
 
-    res.set('Content-Type', 'text/xml');
-    res.send(`<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Answer/>
-  <Stream url="${websocketUrl}"/>
-</Response>`);
+    // Execute Call Control commands via SDK
+    // Note: We respond with 200 OK immediately and execute commands asynchronously
+    const telnyxService = TelnyxService.getInstance();
+    
+    // Answer the call and start the stream
+    // We don't await them to ensure the webhook returns immediately
+    (async () => {
+      const answered = await telnyxService.answerCall(callControlId);
+      if (answered) {
+        await telnyxService.startStream(callControlId, websocketUrl);
+      }
+    })().catch(err => {
+      logger.error({ correlationId, error: err.message }, 'Failed to execute Telnyx commands');
+    });
+
+    res.status(200).send('OK');
 
   } catch (error) {
     const err = error as Error;
