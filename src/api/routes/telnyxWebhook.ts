@@ -4,7 +4,6 @@ import { logger, logCallEvent } from '../../core/logger';
 import { SupabaseService } from '../../services/SupabaseService';
 import { CallManager } from '../../core/CallManager';
 import { randomUUID } from 'crypto';
-import nacl from 'tweetnacl';
 
 const router = express.Router();
 
