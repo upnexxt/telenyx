@@ -36,15 +36,14 @@ function shouldSkipSignatureVerification(): boolean {
   // Auto-skip in development mode if TELNYX_PUBLIC_KEY is not set or is a placeholder
   if (config.NODE_ENV === 'development') {
     const pubKey = (process.env as any)['TELNYX_PUBLIC_KEY'] || '';
-    // Common test/placeholder keys
+    // Common test/placeholder keys - actual keys start with "PK."
     const placeholderPatterns = [
       /^test/i,
       /^placeholder/i,
       /^dev-/i,
-      /^mock/i,
-      /Vmz2qzNtnuzTxi4NE7LmYaX1U/i  // Known placeholder from some setups
+      /^mock/i
     ];
-    return placeholderPatterns.some(pattern => pattern.test(pubKey));
+    return placeholderPatterns.some(pattern => pattern.test(pubKey)) || pubKey === '';
   }
   return false;
 }
