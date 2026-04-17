@@ -66,17 +66,20 @@ export class AIService {
   }
 
   /**
-   * A-Law decode: 8-bit compressed to 16-bit PCM
+   * A-Law decode: 8-bit compressed to 16-bit PCM (ITU-T G.711)
    */
   private aLawDecode(byte: number): number {
-    const sign = (byte & 0x80) ? -1 : 1;
-    const exponent = (byte & 0x70) >> 4;
-    const mantissa = byte & 0x0f;
+    const sign = byte & 0x80;
+    let exponent = (byte & 0x70) >> 4;
+    let mantissa = byte & 0x0f;
 
-    let sample = (mantissa + 16) << (exponent + 3);
-    if (exponent === 0) sample = (mantissa + 16) << 4;
+    // Reconstruct 14-bit sample
+    let sample = (mantissa << 4) + 8; // Add bias
+    if (exponent !== 0) sample += 0x100 << exponent;
 
-    return sample * sign;
+    // Scale to 16-bit range
+    const result = (sample << 1) | ((byte ^ 0x55) & 1);
+    return sign ? -result : result;
   }
 
   /**
@@ -106,29 +109,28 @@ export class AIService {
   }
 
   /**
-   * PCM to A-Law encode: 16-bit PCM to 8-bit compressed
+   * PCM to A-Law encode: 16-bit PCM to 8-bit compressed (ITU-T G.711)
    */
   private pcmToALaw(sample: number): number {
-    const sign = sample < 0 ? 0x80 : 0x00;
-    const absSample = Math.abs(sample);
+    const QUANT_MASK = 0xf;
+    const SEG_SHIFT = 4;
+    const sign = (sample >> 8) & 0x80;
 
-    if (absSample < 256) {
-      return sign | ((absSample >> 4) & 0x0f);
-    } else if (absSample < 512) {
-      return sign | 0x10 | ((absSample >> 5) & 0x0f);
-    } else if (absSample < 1024) {
-      return sign | 0x20 | ((absSample >> 6) & 0x0f);
-    } else if (absSample < 2048) {
-      return sign | 0x30 | ((absSample >> 7) & 0x0f);
-    } else if (absSample < 4096) {
-      return sign | 0x40 | ((absSample >> 8) & 0x0f);
-    } else if (absSample < 8192) {
-      return sign | 0x50 | ((absSample >> 9) & 0x0f);
-    } else if (absSample < 16384) {
-      return sign | 0x60 | ((absSample >> 10) & 0x0f);
-    } else {
-      return sign | 0x70 | ((absSample >> 11) & 0x0f);
+    if (sign !== 0) sample = -sample;
+    if (sample > 32635) sample = 32635;
+
+    let exponent = 7;
+    let mantissa = 0;
+
+    for (let i = 0; i < 8; i++) {
+      if (sample <= (0xff << i)) {
+        exponent = 7 - i;
+        break;
+      }
     }
+
+    mantissa = (sample >> (exponent + 3)) & QUANT_MASK;
+    return ((sign | (exponent << SEG_SHIFT) | mantissa) ^ 0x55) & 0xff;
   }
 
   /**
