@@ -22,7 +22,7 @@ const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (request, socket, head) => {
   const { pathname } = new URL(request.url || '', `http://${request.headers.host}`);
   
-  logger.info(`HTTP Upgrade request received for ${pathname} from ${socket.remoteAddress}`);
+  logger.info(`HTTP Upgrade request received for ${pathname}`);
 
   if (pathname === '/media') {
     wss.handleUpgrade(request, socket, head, (ws) => {
