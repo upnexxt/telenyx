@@ -188,39 +188,6 @@ export class AudioPipeline {
   // ═════════════════════════════════════════════════════════════════════════════
 
   /**
-   * DC Offset Removal: First-order IIR high-pass filter
-   * Removes low-frequency rumble and DC bias from audio signal
-   *
-   * y[n] = alpha × (y[n-1] + x[n] - x[n-1])
-   * where alpha ≈ 0.9691 for fc=80Hz at fs=16kHz (Telnyx L16 input rate)
-   */
-  private removeDcOffset(buffer: Buffer, state: DcFilterState): void {
-    const samples = buffer.length / 2;
-    for (let i = 0; i < samples; i++) {
-      const xn = buffer.readInt16LE(i * 2);
-      const yn = this.ALPHA_DC * (state.prevOut + xn - state.prevIn);
-
-      state.prevIn = xn;
-      state.prevOut = yn;
-
-      const clamped = Math.max(-32768, Math.min(32767, Math.round(yn)));
-      buffer.writeInt16LE(clamped, i * 2);
-    }
-  }
-
-  /**
-   * Echo Suppression: Simple attenuation (-6dB)
-   * When AI is speaking, reduce microphone input to prevent feedback loops
-   */
-  private applyEchoSuppression(buffer: Buffer): void {
-    for (let i = 0; i < buffer.length; i += 2) {
-      const s = buffer.readInt16LE(i);
-      const suppressed = Math.round(s * this.ECHO_SUPPRESS_GAIN);
-      buffer.writeInt16LE(suppressed, i);
-    }
-  }
-
-  /**
    * Soft Limiter: Apply -3dB gain
    * Prevents audio clipping on phone lines
    */
