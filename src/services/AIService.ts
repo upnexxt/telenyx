@@ -47,9 +47,14 @@ export class AIService {
       wav.fromALaw();
       // Resample to 16kHz for Gemini
       wav.toSampleRate(16000);
-      
+
       const samples = (wav as any).data.samples;
-      return Buffer.from(samples).toString('base64');
+      // Ensure samples is a Buffer, not a Uint8Array
+      const sampleBuffer = Buffer.isBuffer(samples)
+        ? samples
+        : Buffer.from(samples);
+
+      return sampleBuffer.toString('base64');
     } catch (error) {
       logger.error({ error: (error as Error).message }, 'Error transcoding Telnyx -> Gemini');
       return base64Payload;
@@ -68,9 +73,14 @@ export class AIService {
       wav.toSampleRate(8000);
       // Encode to A-Law
       wav.toALaw();
-      
+
       const samples = (wav as any).data.samples;
-      return Buffer.from(samples).toString('base64');
+      // Ensure samples is a Buffer, not a Uint8Array
+      const sampleBuffer = Buffer.isBuffer(samples)
+        ? samples
+        : Buffer.from(samples);
+
+      return sampleBuffer.toString('base64');
     } catch (error) {
       logger.error({ error: (error as Error).message }, 'Error transcoding Gemini -> Telnyx');
       return base64Payload;
@@ -122,7 +132,12 @@ export class AIService {
               const geminiAudio24k = data.serverContent.modelTurn.parts[0].inlineData.data;
 
               // Transcode 24kHz PCM -> 8kHz PCMA
+              const inputSize = Buffer.byteLength(geminiAudio24k, 'base64');
               const telnyxAudioAuto = this.transcodeGeminiToTelnyx(geminiAudio24k);
+              const outputSize = Buffer.byteLength(telnyxAudioAuto, 'base64');
+
+              logger.debug({ sessionId, inputSize, outputSize, ratio: (outputSize / inputSize).toFixed(2) },
+                'Audio transcoded Gemini->Telnyx');
 
               // Route through jitter buffer for paced delivery
               const pipeline = AudioPipeline.getInstance();
@@ -196,7 +211,12 @@ export class AIService {
 
     try {
       // Transcode 8kHz PCMA -> 16kHz PCM
+      const inputSize = Buffer.byteLength(base64Audio, 'base64');
       const geminiAudio = this.transcodeTelnyxToGemini(base64Audio);
+      const outputSize = Buffer.byteLength(geminiAudio, 'base64');
+
+      logger.debug({ sessionId, inputSize, outputSize, ratio: (outputSize / inputSize).toFixed(2) },
+        'Audio transcoded Telnyx->Gemini');
 
       session.liveSession.sendRealtimeInput({
         audio: {
