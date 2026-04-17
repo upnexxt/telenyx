@@ -7,7 +7,7 @@ export class TelnyxService {
   private client: any;
 
   private constructor() {
-    this.client = telnyx(config.TELNYX_API_KEY);
+    this.client = new (telnyx as any)(config.TELNYX_API_KEY);
   }
 
   public static getInstance(): TelnyxService {
@@ -23,8 +23,7 @@ export class TelnyxService {
   public async answerCall(callControlId: string): Promise<boolean> {
     try {
       logger.info({ callControlId }, 'Answering Telnyx call');
-      const call = new this.client.Call({ call_control_id: callControlId });
-      await call.answer();
+      await this.client.calls.answer(callControlId);
       return true;
     } catch (error) {
       const err = error as Error;
@@ -39,8 +38,7 @@ export class TelnyxService {
   public async startStream(callControlId: string, websocketUrl: string): Promise<boolean> {
     try {
       logger.info({ callControlId, websocketUrl }, 'Starting bidirectional media stream');
-      const call = new this.client.Call({ call_control_id: callControlId });
-      await call.stream_start({
+      await this.client.calls.streamStart(callControlId, {
         stream_url: websocketUrl,
         stream_track: 'both_tracks'
       });
@@ -58,8 +56,7 @@ export class TelnyxService {
   public async hangupCall(callControlId: string): Promise<boolean> {
     try {
       logger.info({ callControlId }, 'Hanging up Telnyx call');
-      const call = new this.client.Call({ call_control_id: callControlId });
-      await call.hangup();
+      await this.client.calls.hangup(callControlId);
       return true;
     } catch (error) {
       const err = error as Error;
