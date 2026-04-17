@@ -378,7 +378,7 @@ export class SupabaseService {
         message: eventType,
         session_id: correlationId || null,
         level: 'info',
-        source: 'SERVER',
+        source: 'SYSTEM',
         created_at: new Date().toISOString()
       } as any);
 
