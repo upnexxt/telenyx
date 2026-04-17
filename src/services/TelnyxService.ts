@@ -7,7 +7,11 @@ export class TelnyxService {
   private client: any;
 
   private constructor() {
-    this.client = new (telnyx as any)(config.TELNYX_API_KEY);
+    const apiKey = config.TELNYX_API_KEY;
+    if (!apiKey) {
+      logger.error('CRITICAL: TELNYX_API_KEY is missing from environment variables!');
+    }
+    this.client = new (telnyx as any)(apiKey);
   }
 
   public static getInstance(): TelnyxService {
@@ -22,12 +26,14 @@ export class TelnyxService {
    */
   public async answerCall(callControlId: string): Promise<boolean> {
     try {
-      logger.info({ callControlId }, 'Answering Telnyx call');
+      logger.info(`Answering Telnyx call (ID: ${callControlId})`);
       await this.client.calls.answer(callControlId);
       return true;
     } catch (error) {
-      const err = error as Error;
-      logger.error({ callControlId, error: err.message }, 'Failed to answer Telnyx call');
+      const err = error as any;
+      const message = err.message || 'Unknown error';
+      const detail = err.raw?.message || err.detail || '';
+      logger.error(`Failed to answer Telnyx call: ${message} ${detail}`);
       return false;
     }
   }
@@ -37,15 +43,17 @@ export class TelnyxService {
    */
   public async startStream(callControlId: string, websocketUrl: string): Promise<boolean> {
     try {
-      logger.info({ callControlId, websocketUrl }, 'Starting bidirectional media stream');
+      logger.info(`Starting bidirectional media stream (ID: ${callControlId}, URL: ${websocketUrl})`);
       await this.client.calls.streamStart(callControlId, {
         stream_url: websocketUrl,
         stream_track: 'both_tracks'
       });
       return true;
     } catch (error) {
-      const err = error as Error;
-      logger.error({ callControlId, error: err.message }, 'Failed to start media stream');
+      const err = error as any;
+      const message = err.message || 'Unknown error';
+      const detail = err.raw?.message || err.detail || '';
+      logger.error(`Failed to start media stream: ${message} ${detail}`);
       return false;
     }
   }
